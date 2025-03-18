@@ -9,6 +9,7 @@ import { EventEmitter } from 'events';
 import ChromeRemoteInterface from 'chrome-remote-interface';
 import { Logger } from '../logging/logger.js';
 import { config } from '../config.js';
+import { Mutex } from 'async-mutex';
 
 export interface MutationEvent {
   tabId: string;
@@ -17,9 +18,21 @@ export interface MutationEvent {
   targetNodeId?: number;
 }
 
+interface BoundEventHandler {
+  event: string;
+  handler: Function;
+}
+
+interface ObservedTab {
+  client: ChromeRemoteInterface.Client;
+  boundHandlers: BoundEventHandler[];
+  active: boolean;
+}
+
 export class DOMObserver extends EventEmitter {
   private logger: Logger;
-  private observedTabs: Map<string, { client: ChromeRemoteInterface.Client, listeners: Function[] }> = new Map();
+  private observedTabs: Map<string, ObservedTab> = new Map();
+  private mutex: Mutex = new Mutex();
 
   constructor() {
     super();
@@ -30,119 +43,189 @@ export class DOMObserver extends EventEmitter {
    * Start observing a tab for DOM mutations
    */
   async observeTab(tabId: string, client: ChromeRemoteInterface.Client): Promise<void> {
-    if (this.observedTabs.has(tabId)) {
-      this.logger.debug(`Tab ${tabId} is already being observed`);
-      return;
-    }
-
+    const release = await this.mutex.acquire();
     try {
-      // Make sure DOM domain is enabled
-      await client.DOM.enable();
-      
-      // Set up event listeners for DOM mutations
-      const listeners: Function[] = [];
-      
-      // Child list mutations (additions/removals)
-      const childNodeInsertedListener = client.DOM.childNodeInserted((params) => {
-        this.emit('mutation', {
-          tabId,
-          type: 'childList',
-          timestamp: Date.now(),
-          targetNodeId: params.parentNodeId
-        } as MutationEvent);
-      });
-      listeners.push(() => childNodeInsertedListener.dispose());
-      
-      const childNodeRemovedListener = client.DOM.childNodeRemoved((params) => {
-        this.emit('mutation', {
-          tabId,
-          type: 'childList',
-          timestamp: Date.now(),
-          targetNodeId: params.parentNodeId
-        } as MutationEvent);
-      });
-      listeners.push(() => childNodeRemovedListener.dispose());
-      
-      // Attribute mutations
-      const attributeModifiedListener = client.DOM.attributeModified((params) => {
-        this.emit('mutation', {
-          tabId,
-          type: 'attributes',
-          timestamp: Date.now(),
-          targetNodeId: params.nodeId
-        } as MutationEvent);
-      });
-      listeners.push(() => attributeModifiedListener.dispose());
-      
-      const attributeRemovedListener = client.DOM.attributeRemoved((params) => {
-        this.emit('mutation', {
-          tabId,
-          type: 'attributes',
-          timestamp: Date.now(),
-          targetNodeId: params.nodeId
-        } as MutationEvent);
-      });
-      listeners.push(() => attributeRemovedListener.dispose());
-      
-      // Character data mutations (text changes)
-      const characterDataModifiedListener = client.DOM.characterDataModified((params) => {
-        this.emit('mutation', {
-          tabId,
-          type: 'characterData',
-          timestamp: Date.now(),
-          targetNodeId: params.nodeId
-        } as MutationEvent);
-      });
-      listeners.push(() => characterDataModifiedListener.dispose());
-      
-      // Store the tab and its listeners
-      this.observedTabs.set(tabId, { client, listeners });
-      
-      this.logger.info(`Started observing DOM mutations for tab ${tabId}`);
-    } catch (error) {
-      this.logger.error(`Failed to start observing tab ${tabId}`, error);
-      throw error;
+      if (this.observedTabs.has(tabId)) {
+        this.logger.debug(`Tab ${tabId} is already being observed`);
+        return;
+      }
+
+      try {
+        // Make sure DOM domain is enabled
+        await client.DOM.enable();
+        
+        // Set up event listeners for DOM mutations
+        const boundHandlers: BoundEventHandler[] = [];
+        
+        // Child list mutations (additions/removals)
+        const childNodeInsertedHandler = this.createMutationHandler(tabId, 'childList');
+        client.DOM.on('childNodeInserted', childNodeInsertedHandler);
+        boundHandlers.push({
+          event: 'childNodeInserted',
+          handler: childNodeInsertedHandler
+        });
+        
+        const childNodeRemovedHandler = this.createMutationHandler(tabId, 'childList');
+        client.DOM.on('childNodeRemoved', childNodeRemovedHandler);
+        boundHandlers.push({
+          event: 'childNodeRemoved',
+          handler: childNodeRemovedHandler
+        });
+        
+        // Attribute mutations
+        const attributeModifiedHandler = this.createMutationHandler(tabId, 'attributes');
+        client.DOM.on('attributeModified', attributeModifiedHandler);
+        boundHandlers.push({
+          event: 'attributeModified',
+          handler: attributeModifiedHandler
+        });
+        
+        const attributeRemovedHandler = this.createMutationHandler(tabId, 'attributes');
+        client.DOM.on('attributeRemoved', attributeRemovedHandler);
+        boundHandlers.push({
+          event: 'attributeRemoved',
+          handler: attributeRemovedHandler
+        });
+        
+        // Character data mutations (text changes)
+        const characterDataModifiedHandler = this.createMutationHandler(tabId, 'characterData');
+        client.DOM.on('characterDataModified', characterDataModifiedHandler);
+        boundHandlers.push({
+          event: 'characterDataModified',
+          handler: characterDataModifiedHandler
+        });
+        
+        // Store the tab and its handlers
+        this.observedTabs.set(tabId, { 
+          client, 
+          boundHandlers,
+          active: true
+        });
+        
+        this.logger.info(`Started observing DOM mutations for tab ${tabId}`);
+      } catch (error) {
+        this.logger.error(`Failed to start observing tab ${tabId}`, error);
+        throw error;
+      }
+    } finally {
+      release();
     }
+  }
+
+  /**
+   * Create a mutation event handler
+   */
+  private createMutationHandler(tabId: string, type: 'childList' | 'attributes' | 'characterData'): Function {
+    return (params: any) => {
+      // Check if tab is still active before emitting events
+      const tabInfo = this.observedTabs.get(tabId);
+      if (!tabInfo || !tabInfo.active) return;
+
+      this.emit('mutation', {
+        tabId,
+        type,
+        timestamp: Date.now(),
+        targetNodeId: params.nodeId || params.parentNodeId
+      } as MutationEvent);
+    };
   }
 
   /**
    * Stop observing a tab for DOM mutations
    */
-  stopObserving(tabId: string): boolean {
-    const tabData = this.observedTabs.get(tabId);
-    
-    if (!tabData) {
-      this.logger.debug(`Tab ${tabId} is not being observed`);
-      return false;
-    }
-    
-    // Dispose all listeners
-    for (const disposeListener of tabData.listeners) {
-      try {
-        disposeListener();
-      } catch (error) {
-        this.logger.warn(`Error disposing listener for tab ${tabId}`, error);
+  async stopObserving(tabId: string): Promise<boolean> {
+    const release = await this.mutex.acquire();
+    try {
+      const tabInfo = this.observedTabs.get(tabId);
+      
+      if (!tabInfo) {
+        this.logger.debug(`Tab ${tabId} is not being observed`);
+        return false;
       }
+      
+      // Mark as inactive first to prevent further events from being emitted
+      tabInfo.active = false;
+      
+      // Remove all event listeners
+      for (const { event, handler } of tabInfo.boundHandlers) {
+        try {
+          tabInfo.client.DOM.removeListener(event, handler);
+        } catch (error) {
+          this.logger.warn(`Error removing listener "${event}" for tab ${tabId}`, error);
+          // Continue with other listeners despite error
+        }
+      }
+      
+      // Disable DOM domain
+      try {
+        await tabInfo.client.DOM.disable();
+      } catch (error) {
+        this.logger.warn(`Error disabling DOM domain for tab ${tabId}`, error);
+        // Continue with cleanup despite error
+      }
+      
+      // Remove the tab from observed tabs
+      this.observedTabs.delete(tabId);
+      
+      this.logger.info(`Stopped observing DOM mutations for tab ${tabId}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`Error stopping observation for tab ${tabId}`, error);
+      throw error;
+    } finally {
+      release();
     }
-    
-    // Remove the tab from observed tabs
-    this.observedTabs.delete(tabId);
-    
-    this.logger.info(`Stopped observing DOM mutations for tab ${tabId}`);
-    return true;
   }
 
   /**
    * Check if a tab is being observed
    */
-  isObserving(tabId: string): boolean {
-    return this.observedTabs.has(tabId);
+  async isObserving(tabId: string): Promise<boolean> {
+    const release = await this.mutex.acquire();
+    try {
+      const tabInfo = this.observedTabs.get(tabId);
+      return tabInfo ? tabInfo.active : false;
+    } finally {
+      release();
+    }
   }
 
   /**
    * Get the list of tabs being observed
    */
-  getObservedTabs(): string[] {
-    return Array.from(this.observedTabs.keys());
+  async getObservedTabs(): Promise<string[]> {
+    const release = await this.mutex.acquire();
+    try {
+      return Array.from(this.observedTabs.entries())
+        .filter(([_, info]) => info.active)
+        .map(([tabId, _]) => tabId);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Shutdown and cleanup all resources
+   */
+  async shutdown(): Promise<void> {
+    const release = await this.mutex.acquire();
+    try {
+      const tabIds = Array.from(this.observedTabs.keys());
+      
+      for (const tabId of tabIds) {
+        try {
+          await this.stopObserving(tabId);
+        } catch (error) {
+          this.logger.warn(`Error stopping observation for tab ${tabId} during shutdown`, error);
+        }
+      }
+      
+      // Clear all listeners from this emitter
+      this.removeAllListeners();
+      
+      this.logger.info('DOM Observer shutdown complete');
+    } finally {
+      release();
+    }
   }
 }
