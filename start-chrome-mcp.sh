@@ -24,4 +24,4 @@ npm run build
 
 # Start the server
 echo "Starting Chrome Control MCP server..."
-node dist/server/start-mcp-server.js
+node dist/index.js
