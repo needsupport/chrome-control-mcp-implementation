@@ -14,9 +14,11 @@
   "dependencies": {
     "chrome-remote-interface": "^0.33.0",
     "debug": "^4.3.4",
+    "express-rate-limit": "^7.2.0",
     "node-cache": "^5.1.2",
     "node-fetch": "^3.3.2",
-    "typescript": "^5.4.2"
+    "typescript": "^5.4.2",
+    "winston": "^3.12.0"
   },
   "devDependencies": {
     "@types/debug": "^4.1.12",
@@ -24,6 +26,7 @@
     "@types/node": "^20.11.28",
     "@types/node-cache": "^4.1.3",
     "@types/node-fetch": "^2.6.11",
+    "@types/winston": "^2.4.4",
     "@typescript-eslint/eslint-plugin": "^7.2.0",
     "@typescript-eslint/parser": "^7.2.0",
     "eslint": "^8.57.0",
@@ -44,7 +47,9 @@
     "automation",
     "ai",
     "devtools-protocol",
-    "dom"
+    "dom",
+    "semantic",
+    "mcp"
   ],
   "author": "",
   "license": "MIT",
