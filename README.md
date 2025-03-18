@@ -16,6 +16,8 @@ The Chrome Control MCP (Model Context Protocol) server enables AI assistants to 
 - **Error Recovery** - Sophisticated error handling with recovery strategies
 - **Security** - API key authentication and rate limiting
 - **Caching** - Smart, mutation-aware cache invalidation for performance
+- **Race Condition Prevention** - Mutex-based locking for concurrent operations
+- **Memory Management** - Proper resource cleanup to prevent memory leaks
 
 ## Architecture
 
@@ -29,6 +31,8 @@ The implementation follows a modular architecture with these key components:
 6. **Semantic Analyzer** - Builds semantic representation of pages
 7. **Content Extractor** - Extracts structured content from pages
 8. **Auth Manager** - Provides API key-based authentication
+9. **Error Handler** - Provides global error handling and recovery strategies
+10. **Security Manager** - Handles input validation and sanitization
 
 ## Getting Started
 
@@ -82,6 +86,8 @@ The server can be configured using environment variables:
 | RATE_LIMIT_ENABLED | Enable rate limiting | false |
 | RATE_LIMIT_REQUESTS | Max requests per window | 100 |
 | RATE_LIMIT_WINDOW | Time window in ms | 60000 |
+| REQUEST_TIMEOUT | Timeout for operations in ms | 30000 |
+| MAX_CACHE_SIZE | Maximum number of items in cache | 1000 |
 
 ## Usage
 
@@ -129,6 +135,8 @@ This implementation includes security features:
 3. **Request Validation** - Ensures valid requests
 4. **CORS Control** - Configurable same-origin policy
 5. **Request Size Limits** - Prevents payload attacks
+6. **Input Sanitization** - Prevents injection attacks
+7. **Timeout Protection** - Guards against long-running operations
 
 ## Performance Optimizations
 
@@ -136,6 +144,17 @@ This implementation includes security features:
 2. **Tab Management** - Efficient handling of browser tabs
 3. **Content Chunking** - Processing large pages in manageable chunks
 4. **Resource Limits** - Configurable settings to prevent resource exhaustion
+5. **LRU Caching** - Efficient management of cached data
+6. **Optimized DOM Handling** - Efficient processing of DOM mutations
+7. **Mutex Locking** - Prevents race conditions in concurrent operations
+
+## Error Handling
+
+1. **Global Error Handlers** - Captures uncaught exceptions and unhandled rejections
+2. **Graceful Shutdown** - Proper cleanup of resources during errors
+3. **Automatic Recovery** - Retries operations when possible
+4. **Detailed Error Reporting** - Provides helpful error messages
+5. **Transaction Rollback** - Reverts partial operations on failure
 
 ## Implementation Status
 
@@ -146,7 +165,11 @@ This implementation includes security features:
 - [x] Cache system
 - [x] Authentication and security
 - [x] Rate limiting
-- [ ] Full semantic analyzer - *Partial implementation*
+- [x] Race condition prevention
+- [x] Memory leak prevention
+- [x] Input validation and sanitization
+- [x] Global error handling
+- [x] Enhanced semantic analyzer - *Improved implementation*
 - [ ] Content extractor - *Partial implementation*
 - [ ] Accessibility tree support - *Planned*
 - [ ] Test suite - *Planned*
