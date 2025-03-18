@@ -1,6 +1,6 @@
 # Chrome Control MCP Implementation
 
-This repository implements the roadmap for the [chrome-control-mcp](https://github.com/needsupport/chrome-control-mcp) project, providing efficient web browsing capabilities for AI assistants without relying on screenshots.
+Implementation of the [chrome-control-mcp](https://github.com/needsupport/chrome-control-mcp) roadmap, providing efficient web browsing capabilities for AI assistants without relying on screenshots.
 
 ## Project Overview
 
@@ -14,21 +14,21 @@ The Chrome Control MCP (Model Context Protocol) server enables AI assistants to 
 - **Form Handling** - Identifies and interacts with forms accurately
 - **Navigation Management** - Handles complex navigation scenarios reliably
 - **Error Recovery** - Sophisticated error handling with recovery strategies
+- **Security** - API key authentication and rate limiting
+- **Caching** - Smart, mutation-aware cache invalidation for performance
 
 ## Architecture
 
 The implementation follows a modular architecture with these key components:
 
 1. **Chrome MCP Server** - Handles incoming requests from AI assistants
-2. **Chrome API Wrapper** - Provides a clean interface to Chrome DevTools Protocol
-3. **DOM Interaction Layer** - Executes actions like clicking, typing, and scrolling
-4. **Semantic Analyzer** - Builds semantic representation of pages
-5. **Content Extractor** - Extracts structured content from pages
-6. **Navigation Manager** - Handles complex navigation scenarios
-7. **Form Handler** - Identifies and interacts with forms
-8. **Error Handler** - Provides consistent error reporting
-9. **Cache System** - Optimizes performance through intelligent caching
-10. **Logging System** - Records detailed operation logs
+2. **Chrome API** - Main interface to browser control
+3. **Tab Manager** - Centralized tab management
+4. **DOM Observer** - Monitors real-time DOM changes
+5. **Cache System** - Optimizes performance through intelligent caching
+6. **Semantic Analyzer** - Builds semantic representation of pages
+7. **Content Extractor** - Extracts structured content from pages
+8. **Auth Manager** - Provides API key-based authentication
 
 ## Getting Started
 
@@ -66,6 +66,23 @@ The implementation follows a modular architecture with these key components:
    ./start-chrome-mcp.sh
    ```
 
+## Environment Variables
+
+The server can be configured using environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| PORT | Server port | 3001 |
+| CHROME_DEBUGGING_PORT | Chrome debugging port | 9222 |
+| DEBUG | Enable debug mode | false |
+| LOG_LEVEL | Log level (debug, info, warn, error) | info |
+| AUTH_ENABLED | Enable API key authentication | false |
+| API_KEYS | Comma-separated list of valid API keys | [] |
+| GENERATE_API_KEY_ON_STARTUP | Generate API key on startup | true |
+| RATE_LIMIT_ENABLED | Enable rate limiting | false |
+| RATE_LIMIT_REQUESTS | Max requests per window | 100 |
+| RATE_LIMIT_WINDOW | Time window in ms | 60000 |
+
 ## Usage
 
 The server provides a JSON-RPC API that can be accessed at `http://localhost:3001`. Here's a basic example:
@@ -74,7 +91,10 @@ The server provides a JSON-RPC API that can be accessed at `http://localhost:300
 // Navigate to a URL
 fetch('http://localhost:3001', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: { 
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer YOUR_API_KEY' // If auth is enabled
+  },
   body: JSON.stringify({
     jsonrpc: '2.0',
     method: 'navigate',
@@ -89,8 +109,6 @@ fetch('http://localhost:3001', {
 });
 ```
 
-See the `examples` directory for more detailed usage examples.
-
 ## Examples
 
 - **analyze-page.ts** - Demonstrates how to analyze a web page's structure
@@ -102,26 +120,36 @@ Run examples with:
 npx ts-node examples/analyze-page.ts https://example.com
 ```
 
-## Implementation Status
+## Security
 
-This implementation follows the roadmap outlined in the [chrome-control-mcp](https://github.com/needsupport/chrome-control-mcp) project, with a focus on modular architecture and small, interconnected components.
+This implementation includes security features:
+
+1. **API Key Authentication** - Secure access using API keys
+2. **Rate Limiting** - Protection against abuse
+3. **Request Validation** - Ensures valid requests
+4. **CORS Control** - Configurable same-origin policy
+5. **Request Size Limits** - Prevents payload attacks
+
+## Performance Optimizations
+
+1. **Smart Caching** - Automatic cache invalidation based on DOM mutations
+2. **Tab Management** - Efficient handling of browser tabs
+3. **Content Chunking** - Processing large pages in manageable chunks
+4. **Resource Limits** - Configurable settings to prevent resource exhaustion
+
+## Implementation Status
 
 - [x] Basic server structure
 - [x] Chrome API wrapper
-- [x] DOM interaction layer
-- [x] Semantic analyzer
-- [x] Content extractor
-- [x] Navigation manager
-- [x] Form handler
-- [x] Error handling
+- [x] Tab management
+- [x] DOM mutation observing
 - [x] Cache system
-- [x] Logging system
-- [ ] Comprehensive test suite
-- [ ] Documentation
-
-## Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+- [x] Authentication and security
+- [x] Rate limiting
+- [ ] Full semantic analyzer - *Partial implementation*
+- [ ] Content extractor - *Partial implementation*
+- [ ] Accessibility tree support - *Planned*
+- [ ] Test suite - *Planned*
 
 ## License
 
