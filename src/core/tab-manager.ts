@@ -9,6 +9,7 @@ import ChromeRemoteInterface from 'chrome-remote-interface';
 import { Logger } from '../logging/logger.js';
 import { config } from '../config.js';
 import { EventEmitter } from 'events';
+import { Mutex } from 'async-mutex';
 
 export interface Tab {
   id: string;
@@ -32,10 +33,20 @@ export class TabManager extends EventEmitter {
   private tabs: Map<string, Tab> = new Map();
   private sessions: Map<string, TabSession> = new Map();
   private mainConnection: ChromeRemoteInterface.Client | null = null;
+  private tabMutex: Mutex = new Mutex(); // Added mutex for tab operations
   
   constructor() {
     super();
     this.logger = new Logger('tab-manager');
+    
+    // Set up global unhandled error handlers
+    process.on('uncaughtException', (error) => {
+      this.logger.error('Uncaught exception in TabManager', error);
+    });
+    
+    process.on('unhandledRejection', (reason) => {
+      this.logger.error('Unhandled rejection in TabManager', { reason });
+    });
   }
 
   /**
@@ -68,6 +79,9 @@ export class TabManager extends EventEmitter {
       throw new Error('TabManager not initialized');
     }
     
+    // Acquire lock before tab creation to prevent race conditions
+    const release = await this.tabMutex.acquire();
+    
     try {
       // Create a new target/tab
       const { targetId } = await ChromeRemoteInterface.New({ 
@@ -92,7 +106,7 @@ export class TabManager extends EventEmitter {
       // Wait for page load
       await new Promise<void>((resolve) => {
         const loadTimeout = setTimeout(() => {
-          this.logger.warn(`Page load timeout for ${url}`);
+          this.logger.warn(`Page load timeout for ${url} - continuing anyway`);
           resolve();
         }, config.navigationTimeout);
         
@@ -140,60 +154,117 @@ export class TabManager extends EventEmitter {
     } catch (error) {
       this.logger.error(`Failed to create tab for ${url}`, error);
       throw error;
+    } finally {
+      // Always release the lock
+      release();
     }
   }
 
   /**
    * Get a tab by ID
    */
-  getTab(tabId: string): Tab | undefined {
-    return this.tabs.get(tabId);
+  async getTab(tabId: string): Promise<Tab | undefined> {
+    const release = await this.tabMutex.acquire();
+    try {
+      return this.tabs.get(tabId);
+    } finally {
+      release();
+    }
   }
 
   /**
    * Get all tabs
    */
-  getAllTabs(): Tab[] {
-    return Array.from(this.tabs.values());
+  async getAllTabs(): Promise<Tab[]> {
+    const release = await this.tabMutex.acquire();
+    try {
+      return Array.from(this.tabs.values());
+    } finally {
+      release();
+    }
   }
 
   /**
    * Get a CDP client for a tab
    */
-  getTabClient(tabId: string): ChromeRemoteInterface.Client {
-    const session = this.sessions.get(tabId);
+  async getTabClient(tabId: string): Promise<ChromeRemoteInterface.Client> {
+    const release = await this.tabMutex.acquire();
     
-    if (!session) {
-      throw new Error(`No session found for tab ${tabId}`);
+    try {
+      const session = this.sessions.get(tabId);
+      
+      if (!session) {
+        throw new Error(`No session found for tab ${tabId}`);
+      }
+      
+      return session.client;
+    } finally {
+      release();
     }
-    
-    return session.client;
+  }
+
+  /**
+   * Check if a tab exists
+   */
+  async hasTab(tabId: string): Promise<boolean> {
+    const release = await this.tabMutex.acquire();
+    try {
+      return this.tabs.has(tabId);
+    } finally {
+      release();
+    }
   }
 
   /**
    * Close a tab
    */
   async closeTab(tabId: string): Promise<boolean> {
-    const tab = this.tabs.get(tabId);
-    
-    if (!tab) {
-      this.logger.warn(`Tab ${tabId} not found`);
-      return false;
-    }
+    const release = await this.tabMutex.acquire();
     
     try {
+      const tab = this.tabs.get(tabId);
+      
+      if (!tab) {
+        this.logger.warn(`Tab ${tabId} not found`);
+        return false;
+      }
+      
       // Close the client session if it exists
       const session = this.sessions.get(tabId);
       if (session) {
-        await session.client.close();
+        try {
+          // Disable all domains first to ensure cleanup
+          if (session.domains.DOM) {
+            await session.client.DOM.disable();
+          }
+          if (session.domains.Page) {
+            await session.client.Page.disable();
+          }
+          if (session.domains.Runtime) {
+            await session.client.Runtime.disable();
+          }
+          if (session.domains.Network) {
+            await session.client.Network.disable();
+          }
+          
+          await session.client.close();
+        } catch (closeError) {
+          // Just log errors during close, don't throw
+          this.logger.warn(`Error closing CDP client for tab ${tabId}`, closeError);
+        }
+        
         this.sessions.delete(tabId);
       }
       
       // Close the target
-      await ChromeRemoteInterface.Close({ 
-        port: config.chromeDebuggingPort, 
-        id: tabId 
-      });
+      try {
+        await ChromeRemoteInterface.Close({ 
+          port: config.chromeDebuggingPort, 
+          id: tabId 
+        });
+      } catch (closeError) {
+        this.logger.warn(`Error closing target for tab ${tabId}`, closeError);
+      }
       
       // Remove tab from tracking
       this.tabs.delete(tabId);
@@ -207,6 +278,8 @@ export class TabManager extends EventEmitter {
     } catch (error) {
       this.logger.error(`Failed to close tab ${tabId}`, error);
       throw error;
+    } finally {
+      release();
     }
   }
 
@@ -214,13 +287,15 @@ export class TabManager extends EventEmitter {
    * Refresh tab information
    */
   async refreshTabInfo(tabId: string): Promise<Tab> {
-    const tab = this.tabs.get(tabId);
-    
-    if (!tab) {
-      throw new Error(`Tab ${tabId} not found`);
-    }
+    const release = await this.tabMutex.acquire();
     
     try {
+      const tab = this.tabs.get(tabId);
+      
+      if (!tab) {
+        throw new Error(`Tab ${tabId} not found`);
+      }
+      
       const session = this.sessions.get(tabId);
       
       if (!session) {
@@ -248,34 +323,37 @@ export class TabManager extends EventEmitter {
     } catch (error) {
       this.logger.error(`Failed to refresh tab info for ${tabId}`, error);
       throw error;
+    } finally {
+      release();
     }
-  }
-
-  /**
-   * Check if a tab exists
-   */
-  hasTab(tabId: string): boolean {
-    return this.tabs.has(tabId);
   }
 
   /**
    * Clean up and close all tabs
    */
   async cleanup(): Promise<void> {
-    for (const tabId of this.tabs.keys()) {
-      try {
-        await this.closeTab(tabId);
-      } catch (error) {
-        this.logger.warn(`Error closing tab ${tabId} during cleanup`, error);
+    const release = await this.tabMutex.acquire();
+    
+    try {
+      const tabIds = [...this.tabs.keys()];
+      
+      for (const tabId of tabIds) {
+        try {
+          await this.closeTab(tabId);
+        } catch (error) {
+          this.logger.warn(`Error closing tab ${tabId} during cleanup`, error);
+        }
       }
+      
+      // Close the main connection
+      if (this.mainConnection) {
+        await this.mainConnection.close();
+        this.mainConnection = null;
+      }
+      
+      this.logger.info('TabManager cleanup complete');
+    } finally {
+      release();
     }
-    
-    // Close the main connection
-    if (this.mainConnection) {
-      await this.mainConnection.close();
-      this.mainConnection = null;
-    }
-    
-    this.logger.info('TabManager cleanup complete');
   }
 }
