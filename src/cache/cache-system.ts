@@ -9,12 +9,14 @@
 import { Logger } from '../logging/logger.js';
 import { config } from '../config.js';
 import { DOMObserver } from '../dom/dom-mutation-observer.js';
+import { Mutex } from 'async-mutex';
 
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
   tabId?: string;
   tags?: string[];
+  lastAccessed: number; // Added for LRU implementation
 }
 
 export class CacheSystem {
@@ -23,6 +25,8 @@ export class CacheSystem {
   private ttl: number;
   private maxSize: number;
   private domObserver?: DOMObserver;
+  private cacheMutex: Mutex = new Mutex(); // Added mutex for cache operations
+  private mutationListenerRef?: Function; // Store reference for cleanup
 
   constructor(ttl: number = config.cacheTTL * 1000, maxSize: number = config.maxCacheSize) {
     this.ttl = ttl;
@@ -30,7 +34,13 @@ export class CacheSystem {
     this.logger = new Logger('cache-system');
     
     // Set up periodic cleanup
-    setInterval(() => this.cleanup(), 30000);
+    const cleanupInterval = setInterval(() => this.cleanup(), 30000);
+    
+    // Store cleanup interval for potential cleanup
+    if (typeof global !== 'undefined') {
+      // @ts-ignore - Add property to global for cleanup
+      global.__cacheCleanupInterval = cleanupInterval;
+    }
   }
 
   /**
@@ -39,196 +49,332 @@ export class CacheSystem {
   connectDOMObserver(domObserver: DOMObserver): void {
     this.domObserver = domObserver;
     
+    // Clean up existing listener if any
+    if (this.mutationListenerRef) {
+      this.domObserver.removeListener('mutation', this.mutationListenerRef as any);
+    }
+    
     // Set up event listeners for mutations
-    domObserver.on('mutation', (event) => {
+    const mutationHandler = (event: any) => {
       this.invalidateTabCache(event.tabId);
-    });
+    };
+    
+    domObserver.on('mutation', mutationHandler);
+    this.mutationListenerRef = mutationHandler;
     
     this.logger.info('Connected DOM observer for automatic cache invalidation');
   }
 
   /**
+   * Disconnect the DOM observer
+   */
+  disconnectDOMObserver(): void {
+    if (this.domObserver && this.mutationListenerRef) {
+      this.domObserver.removeListener('mutation', this.mutationListenerRef as any);
+      this.mutationListenerRef = undefined;
+      this.logger.info('Disconnected DOM observer');
+    }
+  }
+
+  /**
    * Get a value from the cache
    */
-  get<T>(key: string): T | null {
-    const entry = this.cache.get(key);
+  async get<T>(key: string): Promise<T | null> {
+    const release = await this.cacheMutex.acquire();
     
-    // No cache entry found
-    if (!entry) {
+    try {
+      const entry = this.cache.get(key);
+      
+      // No cache entry found
+      if (!entry) {
+        return null;
+      }
+      
+      // Check if entry has expired
+      if (Date.now() > entry.expiresAt) {
+        this.logger.debug(`Cache entry expired: ${key}`);
+        this.cache.delete(key);
+        return null;
+      }
+      
+      // Update last accessed time for LRU
+      entry.lastAccessed = Date.now();
+      
+      this.logger.debug(`Cache hit: ${key}`);
+      return entry.value as T;
+    } catch (error) {
+      this.logger.error(`Error getting cache entry: ${key}`, error);
       return null;
+    } finally {
+      release();
     }
-    
-    // Check if entry has expired
-    if (Date.now() > entry.expiresAt) {
-      this.logger.debug(`Cache entry expired: ${key}`);
-      this.cache.delete(key);
-      return null;
-    }
-    
-    this.logger.debug(`Cache hit: ${key}`);
-    return entry.value as T;
   }
 
   /**
    * Set a value in the cache
    */
-  set<T>(key: string, value: T, options?: { ttl?: number; tabId?: string; tags?: string[] }): void {
-    // Enforce maximum cache size
-    if (this.cache.size >= this.maxSize) {
-      this.evictOldest();
+  async set<T>(key: string, value: T, options?: { ttl?: number; tabId?: string; tags?: string[] }): Promise<void> {
+    const release = await this.cacheMutex.acquire();
+    
+    try {
+      // Enforce maximum cache size
+      if (this.cache.size >= this.maxSize) {
+        this.evictLRU();
+      }
+      
+      const now = Date.now();
+      const ttl = options?.ttl ?? this.ttl;
+      
+      this.cache.set(key, {
+        value,
+        expiresAt: now + ttl,
+        tabId: options?.tabId,
+        tags: options?.tags,
+        lastAccessed: now
+      });
+      
+      this.logger.debug(`Cache set: ${key}`);
+    } catch (error) {
+      this.logger.error(`Error setting cache entry: ${key}`, error);
+    } finally {
+      release();
     }
-    
-    const now = Date.now();
-    const ttl = options?.ttl ?? this.ttl;
-    
-    this.cache.set(key, {
-      value,
-      expiresAt: now + ttl,
-      tabId: options?.tabId,
-      tags: options?.tags
-    });
-    
-    this.logger.debug(`Cache set: ${key}`);
   }
 
   /**
    * Delete a specific key from the cache
    */
-  delete(key: string): boolean {
-    const result = this.cache.delete(key);
+  async delete(key: string): Promise<boolean> {
+    const release = await this.cacheMutex.acquire();
     
-    if (result) {
-      this.logger.debug(`Cache delete: ${key}`);
+    try {
+      const result = this.cache.delete(key);
+      
+      if (result) {
+        this.logger.debug(`Cache delete: ${key}`);
+      }
+      
+      return result;
+    } catch (error) {
+      this.logger.error(`Error deleting cache entry: ${key}`, error);
+      return false;
+    } finally {
+      release();
     }
-    
-    return result;
   }
 
   /**
    * Clear all entries with a specific prefix
    */
-  clearByPrefix(prefix: string): number {
-    let count = 0;
+  async clearByPrefix(prefix: string): Promise<number> {
+    const release = await this.cacheMutex.acquire();
     
-    for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) {
+    try {
+      let count = 0;
+      
+      // Create a list of keys to delete
+      const keysToDelete: string[] = [];
+      for (const key of this.cache.keys()) {
+        if (key.startsWith(prefix)) {
+          keysToDelete.push(key);
+        }
+      }
+      
+      // Delete in batch
+      for (const key of keysToDelete) {
         this.cache.delete(key);
         count++;
       }
+      
+      if (count > 0) {
+        this.logger.debug(`Cleared ${count} cache entries with prefix: ${prefix}`);
+      }
+      
+      return count;
+    } catch (error) {
+      this.logger.error(`Error clearing cache by prefix: ${prefix}`, error);
+      return 0;
+    } finally {
+      release();
     }
-    
-    if (count > 0) {
-      this.logger.debug(`Cleared ${count} cache entries with prefix: ${prefix}`);
-    }
-    
-    return count;
   }
 
   /**
    * Clear all entries with a specific tag
    */
-  clearByTag(tag: string): number {
-    let count = 0;
+  async clearByTag(tag: string): Promise<number> {
+    const release = await this.cacheMutex.acquire();
     
-    for (const [key, entry] of this.cache.entries()) {
-      if (entry.tags?.includes(tag)) {
+    try {
+      let count = 0;
+      
+      // Create a list of keys to delete
+      const keysToDelete: string[] = [];
+      for (const [key, entry] of this.cache.entries()) {
+        if (entry.tags?.includes(tag)) {
+          keysToDelete.push(key);
+        }
+      }
+      
+      // Delete in batch
+      for (const key of keysToDelete) {
         this.cache.delete(key);
         count++;
       }
+      
+      if (count > 0) {
+        this.logger.debug(`Cleared ${count} cache entries with tag: ${tag}`);
+      }
+      
+      return count;
+    } catch (error) {
+      this.logger.error(`Error clearing cache by tag: ${tag}`, error);
+      return 0;
+    } finally {
+      release();
     }
-    
-    if (count > 0) {
-      this.logger.debug(`Cleared ${count} cache entries with tag: ${tag}`);
-    }
-    
-    return count;
   }
 
   /**
    * Invalidate all cache entries for a specific tab
    */
-  invalidateTabCache(tabId: string): number {
-    let count = 0;
+  async invalidateTabCache(tabId: string): Promise<number> {
+    const release = await this.cacheMutex.acquire();
     
-    // Clear entries directly associated with this tab
-    count += this.clearByPrefix(`tab:${tabId}:`);
-    count += this.clearByPrefix(`content:${tabId}:`);
-    count += this.clearByPrefix(`semantic:${tabId}:`);
-    count += this.clearByPrefix(`dom:${tabId}:`);
-    
-    // Clear entries that have this tabId
-    for (const [key, entry] of this.cache.entries()) {
-      if (entry.tabId === tabId) {
+    try {
+      let count = 0;
+      
+      // Create a list of keys to delete
+      const keysToDelete: string[] = [];
+      
+      // Find entries by tabId or with matching prefixes
+      const prefixes = [`tab:${tabId}:`, `content:${tabId}:`, `semantic:${tabId}:`, `dom:${tabId}:`];
+      
+      for (const [key, entry] of this.cache.entries()) {
+        if (entry.tabId === tabId || prefixes.some(prefix => key.startsWith(prefix))) {
+          keysToDelete.push(key);
+        }
+      }
+      
+      // Delete in batch
+      for (const key of keysToDelete) {
         this.cache.delete(key);
         count++;
       }
+      
+      if (count > 0) {
+        this.logger.info(`Invalidated ${count} cache entries for tab ${tabId}`);
+      }
+      
+      return count;
+    } catch (error) {
+      this.logger.error(`Error invalidating tab cache: ${tabId}`, error);
+      return 0;
+    } finally {
+      release();
     }
-    
-    if (count > 0) {
-      this.logger.info(`Invalidated ${count} cache entries for tab ${tabId}`);
-    }
-    
-    return count;
   }
 
   /**
    * Clear the entire cache
    */
-  clear(): void {
-    const count = this.cache.size;
-    this.cache.clear();
-    this.logger.info(`Cleared entire cache (${count} entries)`);
+  async clear(): Promise<void> {
+    const release = await this.cacheMutex.acquire();
+    
+    try {
+      const count = this.cache.size;
+      this.cache.clear();
+      this.logger.info(`Cleared entire cache (${count} entries)`);
+    } catch (error) {
+      this.logger.error('Error clearing cache', error);
+    } finally {
+      release();
+    }
   }
 
   /**
    * Get cache stats
    */
-  getStats(): { size: number; maxSize: number; ttl: number } {
-    return {
-      size: this.cache.size,
-      maxSize: this.maxSize,
-      ttl: this.ttl
-    };
+  async getStats(): Promise<{ size: number; maxSize: number; ttl: number }> {
+    const release = await this.cacheMutex.acquire();
+    
+    try {
+      return {
+        size: this.cache.size,
+        maxSize: this.maxSize,
+        ttl: this.ttl
+      };
+    } finally {
+      release();
+    }
   }
 
   /**
-   * Evict the oldest entry from the cache
+   * Evict the least recently used entry from the cache
    */
-  private evictOldest(): void {
+  private evictLRU(): void {
     if (this.cache.size === 0) return;
     
     let oldestKey: string | null = null;
-    let oldestTime = Infinity;
+    let oldestAccessTime = Infinity;
     
     for (const [key, entry] of this.cache.entries()) {
-      if (entry.expiresAt < oldestTime) {
+      if (entry.lastAccessed < oldestAccessTime) {
         oldestKey = key;
-        oldestTime = entry.expiresAt;
+        oldestAccessTime = entry.lastAccessed;
       }
     }
     
     if (oldestKey) {
       this.cache.delete(oldestKey);
-      this.logger.debug(`Cache eviction (oldest): ${oldestKey}`);
+      this.logger.debug(`Cache eviction (LRU): ${oldestKey}`);
     }
   }
 
   /**
    * Clean up expired cache entries
    */
-  private cleanup(): void {
-    const now = Date.now();
-    let count = 0;
+  private async cleanup(): Promise<void> {
+    const release = await this.cacheMutex.acquire();
     
-    for (const [key, entry] of this.cache.entries()) {
-      if (entry.expiresAt < now) {
+    try {
+      const now = Date.now();
+      let count = 0;
+      
+      // Create a list of keys to delete
+      const keysToDelete: string[] = [];
+      for (const [key, entry] of this.cache.entries()) {
+        if (entry.expiresAt < now) {
+          keysToDelete.push(key);
+        }
+      }
+      
+      // Delete in batch
+      for (const key of keysToDelete) {
         this.cache.delete(key);
         count++;
       }
+      
+      if (count > 0) {
+        this.logger.debug(`Cleanup: removed ${count} expired cache entries`);
+      }
+    } catch (error) {
+      this.logger.error('Error during cache cleanup', error);
+    } finally {
+      release();
     }
+  }
+
+  /**
+   * Clean up resources
+   */
+  dispose(): void {
+    this.disconnectDOMObserver();
     
-    if (count > 0) {
-      this.logger.debug(`Cleanup: removed ${count} expired cache entries`);
+    // Clear cleanup interval
+    if (typeof global !== 'undefined' && (global as any).__cacheCleanupInterval) {
+      clearInterval((global as any).__cacheCleanupInterval);
+      delete (global as any).__cacheCleanupInterval;
     }
   }
 }
