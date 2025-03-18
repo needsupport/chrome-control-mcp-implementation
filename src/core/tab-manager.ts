@@ -33,7 +33,7 @@ export class TabManager extends EventEmitter {
   private tabs: Map<string, Tab> = new Map();
   private sessions: Map<string, TabSession> = new Map();
   private mainConnection: ChromeRemoteInterface.Client | null = null;
-  private mutex: Mutex = new Mutex(); // Mutex for thread safety
+  private tabMutex: Mutex = new Mutex(); // Use the name from main branch for consistency
   
   constructor() {
     super();
@@ -44,7 +44,7 @@ export class TabManager extends EventEmitter {
    * Initialize the TabManager with Chrome DevTools Protocol
    */
   async initialize(): Promise<void> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       // Check if Chrome is accessible
       const targets = await ChromeRemoteInterface.List({ port: config.chromeDebuggingPort });
@@ -69,7 +69,7 @@ export class TabManager extends EventEmitter {
    * Create a new tab
    */
   async createTab(url: string): Promise<string> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       if (!this.mainConnection) {
         throw new Error('TabManager not initialized');
@@ -165,7 +165,7 @@ export class TabManager extends EventEmitter {
    * Get a tab by ID
    */
   async getTab(tabId: string): Promise<Tab | undefined> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       return this.tabs.get(tabId);
     } finally {
@@ -177,7 +177,7 @@ export class TabManager extends EventEmitter {
    * Get all tabs
    */
   async getAllTabs(): Promise<Tab[]> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       return Array.from(this.tabs.values());
     } finally {
@@ -189,7 +189,7 @@ export class TabManager extends EventEmitter {
    * Get a CDP client for a tab
    */
   async getTabClient(tabId: string): Promise<ChromeRemoteInterface.Client> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       const session = this.sessions.get(tabId);
       
@@ -207,7 +207,7 @@ export class TabManager extends EventEmitter {
    * Close a tab
    */
   async closeTab(tabId: string): Promise<boolean> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       const tab = this.tabs.get(tabId);
       
@@ -268,7 +268,7 @@ export class TabManager extends EventEmitter {
    * Refresh tab information
    */
   async refreshTabInfo(tabId: string): Promise<Tab> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       const tab = this.tabs.get(tabId);
       
@@ -312,7 +312,7 @@ export class TabManager extends EventEmitter {
    * Check if a tab exists
    */
   async hasTab(tabId: string): Promise<boolean> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       return this.tabs.has(tabId);
     } finally {
@@ -324,13 +324,53 @@ export class TabManager extends EventEmitter {
    * Clean up and close all tabs
    */
   async cleanup(): Promise<void> {
-    const release = await this.mutex.acquire();
+    const release = await this.tabMutex.acquire();
     try {
       const tabIds = Array.from(this.tabs.keys());
       
       for (const tabId of tabIds) {
         try {
-          await this.closeTab(tabId);
+          // Use the internal cleanup logic from main branch to avoid re-acquiring the mutex
+          const tab = this.tabs.get(tabId);
+          
+          if (tab) {
+            // Close the client session if it exists
+            const session = this.sessions.get(tabId);
+            if (session) {
+              try {
+                // Disable all domains before closing
+                await Promise.allSettled([
+                  session.client.DOM.disable(),
+                  session.client.Page.disable(), 
+                  session.client.Runtime.disable(),
+                  session.client.Network.disable()
+                ]);
+                
+                await session.client.close();
+              } catch (error) {
+                this.logger.warn(`Error closing client for tab ${tabId} during cleanup`, error);
+              }
+              this.sessions.delete(tabId);
+            }
+            
+            // Close the target
+            try {
+              await ChromeRemoteInterface.Close({ 
+                port: config.chromeDebuggingPort, 
+                id: tabId 
+              });
+            } catch (error) {
+              this.logger.warn(`Error closing target for tab ${tabId} during cleanup`, error);
+            }
+            
+            // Remove tab from tracking
+            this.tabs.delete(tabId);
+            
+            this.logger.info(`Closed tab during cleanup: ${tabId}`);
+            
+            // Emit event
+            this.emit('tabClosed', tab);
+          }
         } catch (error) {
           this.logger.warn(`Error closing tab ${tabId} during cleanup`, error);
         }
