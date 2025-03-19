@@ -16,7 +16,8 @@ import { config } from '../config.js';
 import { SemanticAnalyzer } from '../dom/semantic-analyzer.js';
 import { ContentExtractor } from '../dom/content-extractor.js';
 import { Mutex } from 'async-mutex';
-import { withRetry, withTimeout, withMutex } from '../utils/retry.js';
+import { withRetry, withTimeout, withMutex, retry } from '../utils/retry.js';
+import { getAccessibilityTree, AccessibilityTreeResult } from '../dom/accessibility-tree.js';
 
 /**
  * Main API class for Chrome Control MCP
@@ -461,6 +462,56 @@ export class ChromeAPI {
   }
 
   /**
+   * Get the accessibility tree for a page
+   */
+  async getAccessibilityTree(tabId: string): Promise<{ accessibilityTree: AccessibilityTreeResult }> {
+    this.logger.info(`Getting accessibility tree for tab ${tabId}`);
+    
+    return await withMutex(this.mutex, async (release) => {
+      try {
+        // Check cache first
+        const cacheKey = `accessibility-tree:${tabId}`;
+        const cachedTree = this.cacheSystem.get<AccessibilityTreeResult>(cacheKey);
+        
+        if (cachedTree) {
+          this.logger.debug('Returning cached accessibility tree', { tabId });
+          return { accessibilityTree: cachedTree };
+        }
+        
+        // Validate the tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client for this tab
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Enable Accessibility domain if needed
+        await client.Accessibility.enable();
+        
+        // Get the accessibility tree with retry logic
+        const accessibilityTree = await withTimeout(
+          () => getAccessibilityTree(client, tabId),
+          { 
+            name: `get accessibility tree for tab ${tabId}`,
+            timeoutMs: config.requestTimeout
+          }
+        );
+        
+        // Cache the tree
+        this.cacheSystem.set(cacheKey, accessibilityTree, { tabId });
+        
+        return { accessibilityTree };
+      } catch (error) {
+        this.logger.error('Accessibility tree error', { tabId, error });
+        throw new Error(`Failed to get accessibility tree: ${error.message}`);
+      }
+    }, {
+      name: `getAccessibilityTree for tab ${tabId}`
+    });
+  }
+
+  /**
    * Find elements containing specific text
    */
   async findElementsByText(tabId: string, text: string): Promise<{ elements: SemanticElement[] }> {
@@ -644,7 +695,7 @@ export class ChromeAPI {
         // Enhanced security: Sanitize the search query
         const sanitizedQuery = query.replace(/[<>"'&]/g, '');
         
-        // Simple implementation: find a search input and submit with query
+        // Simple implementation: find a search form or input and submit with query
         const result = await client.Runtime.evaluate({
           expression: `
             (function() {
