@@ -23,10 +23,25 @@ export const config = {
   // Server configuration
   serverPort: getEnvVarNum('PORT', 3001),
   
-  // Chrome configuration
+  // Chrome process management configuration
+  manageChromeProcess: getEnvVarBool('MANAGE_CHROME_PROCESS', true),
+  chromeExecutablePath: getEnvVar('CHROME_EXECUTABLE', ''),
+  chromeLaunchTimeout: getEnvVarNum('CHROME_LAUNCH_TIMEOUT', 30000), // 30 seconds
+  chromeRestartAttempts: getEnvVarNum('CHROME_RESTART_ATTEMPTS', 3),
+  chromeRestartBackoff: getEnvVarNum('CHROME_RESTART_BACKOFF', 1000), // 1 second
+  chromeHealthCheckInterval: getEnvVarNum('CHROME_HEALTH_CHECK_INTERVAL', 5000), // 5 seconds
+  chromeTempUserDataDir: getEnvVarBool('CHROME_TEMP_USER_DATA_DIR', true),
+  chromeUserDataDir: getEnvVar('CHROME_USER_DATA_DIR', ''),
+  chromeHeadless: getEnvVarBool('CHROME_HEADLESS', process.env.NODE_ENV !== 'development'),
+  chromeAdditionalFlags: getEnvVarArray('CHROME_ADDITIONAL_FLAGS'),
+  minChromeVersion: getEnvVarNum('MIN_CHROME_VERSION', 115),
+  
+  // Chrome connection configuration
   chromeDebuggingPort: getEnvVarNum('CHROME_DEBUGGING_PORT', 9222),
   connectionTimeout: getEnvVarNum('CONNECTION_TIMEOUT', 30000), // 30 seconds
   navigationTimeout: getEnvVarNum('NAVIGATION_TIMEOUT', 30000), // 30 seconds
+  connectionRetryAttempts: getEnvVarNum('CONNECTION_RETRY_ATTEMPTS', 3),
+  connectionRetryDelay: getEnvVarNum('CONNECTION_RETRY_DELAY', 1000), // 1 second
   
   // Cache configuration
   cacheTTL: getEnvVarNum('CACHE_TTL', 10), // 10 seconds
@@ -37,6 +52,7 @@ export const config = {
   debugMode: getEnvVarBool('DEBUG', false),
   logLevel: getEnvVar('LOG_LEVEL', 'info'),
   logDirectory: getEnvVar('LOG_DIR', './logs'),
+  logChromeOutput: getEnvVarBool('LOG_CHROME_OUTPUT', false),
   
   // DOM interaction configuration
   domPollingInterval: getEnvVarNum('DOM_POLLING_INTERVAL', 100), // milliseconds
@@ -55,6 +71,7 @@ export const config = {
   enableAccessibilityTree: getEnvVarBool('ENABLE_ACCESSIBILITY_TREE', true),
   enableCrossOriginHandling: getEnvVarBool('ENABLE_CROSS_ORIGIN_HANDLING', true),
   enableContentEmbeddings: getEnvVarBool('ENABLE_CONTENT_EMBEDDINGS', false), // Disabled by default
+  enableConnectionRecovery: getEnvVarBool('ENABLE_CONNECTION_RECOVERY', true),
   
   // Authentication configuration
   authEnabled: getEnvVarBool('AUTH_ENABLED', true), // SECURITY: Enabled by default
@@ -89,4 +106,6 @@ export const config = {
   // Concurrency and resource management
   gracefulShutdownTimeout: getEnvVarNum('GRACEFUL_SHUTDOWN_TIMEOUT', 10000), // 10 seconds
   tabCleanupInterval: getEnvVarNum('TAB_CLEANUP_INTERVAL', 60000), // 1 minute
+  maxTabsPerInstance: getEnvVarNum('MAX_TABS_PER_INSTANCE', 50), // Maximum tabs per Chrome instance
+  resourceMonitoringInterval: getEnvVarNum('RESOURCE_MONITORING_INTERVAL', 30000), // 30 seconds
 };
