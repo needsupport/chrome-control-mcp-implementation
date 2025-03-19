@@ -88,6 +88,7 @@ The server can be configured using environment variables:
 | RATE_LIMIT_WINDOW | Time window in ms | 60000 |
 | REQUEST_TIMEOUT | Timeout for operations in ms | 30000 |
 | MAX_CACHE_SIZE | Maximum number of items in cache | 1000 |
+| MAX_SEMANTIC_ANALYSIS_DEPTH | Maximum depth for semantic analysis | 50 |
 
 ## Usage
 
@@ -114,6 +115,25 @@ fetch('http://localhost:3001', {
   console.log(`Page loaded in tab: ${tabId}`);
 });
 ```
+
+## Semantic Analysis and Content Extraction
+
+The implementation provides sophisticated semantic analysis capabilities:
+
+### Semantic Analyzer
+- Identifies interactive elements (buttons, links, forms, etc.)
+- Assigns importance scores to elements based on multiple factors
+- Builds hierarchical relationships between elements
+- Uses ARIA roles and attributes for better accessibility
+- Finds elements by text, type, or role
+- Provides helpers for creating reliable CSS selectors
+
+### Content Extractor
+- Extracts structured content from pages (headings, paragraphs, lists, etc.)
+- Identifies navigation elements and menus
+- Extracts form structures with field types, options, and relationships
+- Processes main content areas with intelligent chunking
+- Extracts metadata from the page
 
 ## Examples
 
@@ -169,8 +189,8 @@ This implementation includes security features:
 - [x] Memory leak prevention
 - [x] Input validation and sanitization
 - [x] Global error handling
-- [x] Enhanced semantic analyzer - *Improved implementation*
-- [ ] Content extractor - *Partial implementation*
+- [x] Enhanced semantic analyzer - *Complete implementation*
+- [x] Content extractor - *Complete implementation*
 - [ ] Accessibility tree support - *Planned*
 - [ ] Test suite - *Planned*
 
