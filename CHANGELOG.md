@@ -5,31 +5,33 @@ All notable changes to the Chrome Control MCP Implementation will be documented 
 ## [Unreleased]
 
 ### Added
+- Complete Chrome Process Manager implementation
+- Robust crash detection and automatic recovery
+- Process health monitoring with automatic restart
+- Event system for process lifecycle (start, stop, crash, restart)
+- Temporary directory cleanup and resource management
+- Performance optimizations for local deployment
+- Example scripts for common local use cases
+
+### Changed
+- Updated roadmap with focus on local deployment
+- Enhanced startup script to detect and use locally available Chrome
+- Improved graceful shutdown with proper cleanup of all resources
+- Optimized local performance for reduced overhead
+- Updated documentation for local deployment scenarios
+
+### Fixed
+- Chrome process management in startup script
+- Resource cleanup during graceful shutdown
+- Improved error handling with local environment focus
+- Tab management race conditions
+- Process resources memory leaks
+
+## [Previously Added]
 - Automated Chrome process management in startup script
 - Connection retry logic for Chrome CDP
 - Enhanced error recovery for lost connections
 - Port conflict handling logic
-- Improved dependency management in start-up script
-- Health check endpoints for connectivity verification
-- Debugging section in README.md
-- WebSocket traffic monitoring utilities
-
-### Changed
-- Enhanced startup script to automatically launch Chrome with proper debugging flags
-- Improved graceful shutdown with proper cleanup of all resources
-- Updated dependency handling logic
-- Enhanced session recovery for disconnections
-- Improved synchronization for concurrent tab operations
-
-### Fixed
-- Chrome process management in startup script
-- Connection handling and reconnection logic
-- Resource cleanup during graceful shutdown
-- Race conditions in tab management
-- Session tracking and cleanup
-- Build process handling in startup script
-
-## [Previously Added]
 - Mutex-based locking for race condition fixes
 - Proper cleanup for memory leak prevention
 - LRU cache and optimized DOM handling for performance improvements
@@ -40,14 +42,21 @@ All notable changes to the Chrome Control MCP Implementation will be documented 
 - CHANGELOG.md to track changes
 
 ## [Previously Changed]
+- Enhanced startup script to automatically launch Chrome with proper debugging flags
+- Updated dependency handling logic
+- Enhanced session recovery for disconnections
+- Improved synchronization for concurrent tab operations
 - Updated startup script to point to `dist/index.js` instead of `dist/server/start-mcp-server.js`
 - Improved documentation with details about new features
 - Enhanced Implementation Status section with recent improvements
 
 ## [Previously Fixed]
+- Connection handling and reconnection logic
 - Race conditions in tab management and DOM observation
 - Memory leaks in DOM observers and Chrome resources
 - Improved error recovery in critical operations
+- Session tracking and cleanup
+- Build process handling in startup script
 
 ## [1.0.0] - 2025-03-18
 
