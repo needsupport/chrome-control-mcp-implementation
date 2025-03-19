@@ -294,3 +294,201 @@ export class SemanticAnalyzer {
       default: return ElementType.OTHER;
     }
   }
+  
+  /**
+   * Parse DOM attributes from array format to object
+   */
+  private parseAttributes(attributes: string[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    
+    for (let i = 0; i < attributes.length; i += 2) {
+      if (i + 1 < attributes.length) {
+        result[attributes[i]] = attributes[i + 1];
+      }
+    }
+    
+    return result;
+  }
+  
+  /**
+   * Build parent-child relationships between semantic elements
+   */
+  private buildRelationships(elements: SemanticElement[]): void {
+    // Create a map for fast lookup
+    const elementMap = new Map<number, SemanticElement>();
+    for (const element of elements) {
+      elementMap.set(element.nodeId, element);
+    }
+    
+    // Now establish parent-child relationships
+    for (const element of elements) {
+      // Find all elements that have this element's nodeId in their path
+      for (const potentialChild of elements) {
+        if (potentialChild === element) continue;
+        
+        // Use DOM structure to determine parent-child relationships
+        // This is a simplified approximation
+        if (potentialChild.parentId === undefined) {
+          // Try to establish parent-child relationship based on DOM hierarchy
+          // This would be more accurate with actual DOM parentNode information
+          const childId = potentialChild.semanticId;
+          if (!element.childIds.includes(childId)) {
+            element.childIds.push(childId);
+            potentialChild.parentId = element.semanticId;
+          }
+        }
+      }
+    }
+  }
+  
+  /**
+   * Calculate importance scores for semantic elements
+   */
+  private calculateImportanceScores(elements: SemanticElement[]): void {
+    for (const element of elements) {
+      let score = 50; // Base score
+      
+      // Element type-based scoring
+      switch (element.elementType) {
+        case ElementType.HEADING:
+          // Headings are very important
+          score += 30;
+          break;
+        case ElementType.BUTTON:
+        case ElementType.LINK:
+          // Interactive elements are important
+          score += 20;
+          break;
+        case ElementType.INPUT:
+        case ElementType.CHECKBOX:
+        case ElementType.RADIO:
+          // Input elements are important
+          score += 15;
+          break;
+        case ElementType.NAVIGATION:
+          // Navigation is important
+          score += 25;
+          break;
+        case ElementType.FORM:
+          // Forms are important
+          score += 20;
+          break;
+        case ElementType.TEXT:
+          // Text content's importance depends on length
+          score += Math.min(15, element.text.length / 20);
+          break;
+      }
+      
+      // Check attributes for importance clues
+      if (element.attributes['id']) score += 5;
+      if (element.attributes['name']) score += 5;
+      if (element.attributes['class'] && 
+          (element.attributes['class'].includes('main') || 
+           element.attributes['class'].includes('primary') ||
+           element.attributes['class'].includes('important'))) {
+        score += 10;
+      }
+      
+      // Text content
+      if (element.text) {
+        // More text generally means more important
+        score += Math.min(10, element.text.length / 100);
+      }
+      
+      // Visibility affects importance
+      if (element.boundingBox) {
+        const { width, height } = element.boundingBox;
+        if (width === 0 || height === 0) {
+          // Zero-dimension elements are usually invisible
+          score -= 30;
+        } else if (width > 200 && height > 200) {
+          // Larger elements are often more important
+          score += 10;
+        }
+        
+        // Position on page - elements near top often more important
+        if (element.boundingBox.y < 300) {
+          score += 10;
+        }
+      }
+      
+      // ARIA attributes increase importance
+      const ariaAttributes = Object.keys(element.attributes).filter(
+        attr => attr.startsWith('aria-')
+      );
+      score += ariaAttributes.length * 2;
+      
+      // Cap the score at 100
+      element.importance = Math.max(0, Math.min(100, score));
+    }
+  }
+  
+  /**
+   * Find semantic elements by text content
+   */
+  async findElementsByText(
+    elements: SemanticElement[],
+    text: string,
+    options: {
+      exactMatch?: boolean,
+      caseSensitive?: boolean
+    } = {}
+  ): Promise<SemanticElement[]> {
+    const { exactMatch = false, caseSensitive = false } = options;
+    
+    return elements.filter(element => {
+      const elementText = caseSensitive ? element.text : element.text.toLowerCase();
+      const searchText = caseSensitive ? text : text.toLowerCase();
+      
+      if (exactMatch) {
+        return elementText === searchText;
+      } else {
+        return elementText.includes(searchText);
+      }
+    });
+  }
+  
+  /**
+   * Find semantic elements by type
+   */
+  findElementsByType(
+    elements: SemanticElement[],
+    type: ElementType | ElementType[]
+  ): SemanticElement[] {
+    const types = Array.isArray(type) ? type : [type];
+    return elements.filter(element => types.includes(element.elementType));
+  }
+  
+  /**
+   * Find elements by role
+   */
+  findElementsByRole(
+    elements: SemanticElement[],
+    role: string
+  ): SemanticElement[] {
+    return elements.filter(element => element.role === role);
+  }
+  
+  /**
+   * Create a selector for a semantic element
+   */
+  createSelector(element: SemanticElement): string {
+    if (element.attributes.id) {
+      return `#${element.attributes.id}`;
+    }
+    
+    if (element.attributes.name) {
+      return `[name="${element.attributes.name}"]`;
+    }
+    
+    if (element.attributes.class) {
+      const classes = element.attributes.class.split(/\s+/).map(c => `.${c}`).join('');
+      if (classes) {
+        return classes;
+      }
+    }
+    
+    // Fallback to using semantic ID (requires custom data attribute in DOM)
+    return `[data-semantic-id="${element.semanticId}"]`;
+  }
+}
