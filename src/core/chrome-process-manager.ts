@@ -1,6 +1,6 @@
 /**
  * Chrome Process Manager
- *
+ * 
  * Handles the lifecycle of Chrome processes, including:
  * - Starting Chrome with proper debugging flags
  * - Monitoring Chrome process health
@@ -270,10 +270,11 @@ export class ChromeProcessManager extends EventEmitter {
         // Linux and others - use which command to find executables
         for (const exe of ['google-chrome', 'google-chrome-stable', 'chrome', 'chromium', 'chromium-browser']) {
           try {
-            const { stdout } = await execCallback(`which ${exe}`);
-            if (stdout && stdout.trim()) {
-              return stdout.trim();
-            }
+            const result = execCallback(`which ${exe}`, (error, stdout) => {
+              if (!error && stdout && stdout.toString().trim()) {
+                return stdout.toString().trim();
+              }
+            });
           } catch {
             // Ignore which command failure and try next executable
           }
@@ -446,9 +447,14 @@ export class ChromeProcessManager extends EventEmitter {
    */
   private async isDebugPortInUse(): Promise<boolean> {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      
       const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
-        timeout: 2000 // 2 second timeout
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       return response.ok;
     } catch (error) {
       return false;
@@ -737,6 +743,12 @@ export class ChromeProcessManager extends EventEmitter {
         // Also check if targets are available (a good indicator of Chrome health)
         const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
         isHealthy = targetsResponse.ok;
+        
+        if (targetsResponse.ok) {
+          const targets = await targetsResponse.json();
+          // Check if targets is an array (valid response)
+          isHealthy = Array.isArray(targets);
+        }
       } else {
         isHealthy = false;
       }
@@ -839,9 +851,11 @@ export class ChromeProcessManager extends EventEmitter {
         const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
         if (targetsResponse.ok) {
           const targets = await targetsResponse.json();
-          for (const target of targets) {
-            if (target.type === 'page' && target.id) {
-              await fetch(`http://localhost:${this.options.debugPort}/json/close/${target.id}`);
+          if (Array.isArray(targets)) {
+            for (const target of targets) {
+              if (target.type === 'page' && target.id) {
+                await fetch(`http://localhost:${this.options.debugPort}/json/close/${target.id}`);
+              }
             }
           }
         }
@@ -993,7 +1007,7 @@ export class ChromeProcessManager extends EventEmitter {
         // Try to continue anyway as the version check might be failing due to different output format
         return { majorVersion: 0, fullVersion: versionOutput };
       }
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof ChromeVersionError) {
         throw error;
       }
