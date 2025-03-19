@@ -10,11 +10,13 @@ import { ChromeAPI } from '../chrome/chrome-api.js';
 import { Logger } from '../logging/logger.js';
 import { AuthManager } from './auth.js';
 import { config } from '../config.js';
+import { RequestQueue } from '../utils/request-queue.js';
 
 // Initialize components
 const logger = new Logger('server');
 const chromeAPI = new ChromeAPI();
 const authManager = new AuthManager();
+const requestQueue = new RequestQueue(config.maxConcurrentRequests, config.requestTimeout);
 
 // Rate limiting data
 interface RateLimitData {
@@ -23,11 +25,21 @@ interface RateLimitData {
 }
 const rateLimits = new Map<string, RateLimitData>();
 
+// Server instance
+let serverInstance: http.Server | null = null;
+
 /**
  * Start the MCP server on the specified port
  */
 export function startServer(port: number): http.Server {
   const server = http.createServer(handleRequest);
+  serverInstance = server;
+  
+  // Initialize chromeAPI on server start
+  chromeAPI.initialize().catch(error => {
+    logger.error('Failed to initialize ChromeAPI', error);
+    process.exit(1);
+  });
   
   server.listen(port, () => {
     logger.info(`Chrome Control MCP server started on port ${port}`);
@@ -56,7 +68,12 @@ export function startServer(port: number): http.Server {
       if (req.url === config.healthcheckPath && req.method === 'GET') {
         res.statusCode = 200;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ status: 'ok', timestamp: Date.now() }));
+        res.end(JSON.stringify({ 
+          status: 'ok', 
+          timestamp: Date.now(),
+          version: '1.0.0',
+          uptime: process.uptime()
+        }));
       }
     });
   }
@@ -68,6 +85,36 @@ export function startServer(port: number): http.Server {
 }
 
 /**
+ * Gracefully shutdown the server
+ */
+export async function shutdownServer(): Promise<void> {
+  logger.info('Shutting down server...');
+  
+  // Cancel all pending requests
+  requestQueue.cancelAll('Server shutdown');
+  
+  // Close server and stop accepting new connections
+  if (serverInstance) {
+    await new Promise<void>((resolve) => {
+      serverInstance!.close(() => {
+        logger.info('Server stopped accepting new connections');
+        resolve();
+      });
+    });
+  }
+  
+  // Clean up resources
+  try {
+    await chromeAPI.cleanup();
+    logger.info('Chrome API resources cleaned up');
+  } catch (error) {
+    logger.error('Error cleaning up Chrome API resources', error);
+  }
+  
+  logger.info('Server shutdown complete');
+}
+
+/**
  * Handle incoming HTTP requests
  */
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -75,6 +122,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const timeoutId = setTimeout(() => {
     logger.warn('Request timeout exceeded');
     res.statusCode = 408; // Request Timeout
+    res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
       jsonrpc: '2.0',
       error: {
@@ -85,21 +133,32 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }));
   }, config.requestTimeout);
   
+  // Handle request termination scenarios
+  req.on('close', () => {
+    clearTimeout(timeoutId);
+  });
+  
+  req.on('error', (error) => {
+    clearTimeout(timeoutId);
+    logger.error('Request error', error);
+  });
+  
   // Clear timeout when response ends
   res.on('finish', () => {
     clearTimeout(timeoutId);
   });
   
-  // Enable CORS
-  const origin = req.headers.origin || '*';
-  const allowedOrigins = config.allowedOrigins;
+  // Set security headers
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
   
-  if (allowedOrigins.includes('*') || allowedOrigins.includes(origin as string)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
-    res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+  if (config.enableCSP) {
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; object-src 'none';");
   }
+  
+  // Handle CORS
+  handleCors(req, res);
   
   // Handle preflight OPTIONS request
   if (req.method === 'OPTIONS') {
@@ -110,6 +169,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   
   // Only accept POST requests
   if (req.method !== 'POST') {
+    clearTimeout(timeoutId);
     res.statusCode = 405; // Method Not Allowed
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
@@ -124,48 +184,38 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
   
   // Check authentication if enabled
-  if (authManager.isEnabled()) {
-    const apiKey = authManager.extractApiKey(req.headers.authorization) || req.headers['x-api-key'] as string;
-    
-    if (!authManager.verifyApiKey(apiKey)) {
-      res.statusCode = 401; // Unauthorized
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: {
-          code: -32001,
-          message: 'Unauthorized: Invalid or missing API key'
-        },
-        id: null
-      }));
-      return;
-    }
+  if (!checkAuthentication(req, res)) {
+    clearTimeout(timeoutId);
+    return;
   }
   
   // Check rate limiting if enabled
-  if (config.rateLimitEnabled) {
-    const clientIp = (req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
-    
-    if (!checkRateLimit(clientIp)) {
-      res.statusCode = 429; // Too Many Requests
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: {
-          code: -32002,
-          message: 'Too many requests. Please try again later.'
-        },
-        id: null
-      }));
-      return;
-    }
+  if (!checkRateLimit(req, res)) {
+    clearTimeout(timeoutId);
+    return;
   }
   
   try {
     // Check request size
     const contentLength = parseInt(req.headers['content-length'] || '0', 10);
     
+    if (isNaN(contentLength)) {
+      clearTimeout(timeoutId);
+      res.statusCode = 400; // Bad Request
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32600,
+          message: 'Invalid content-length header'
+        },
+        id: null
+      }));
+      return;
+    }
+    
     if (contentLength > config.maxRequestSize) {
+      clearTimeout(timeoutId);
       res.statusCode = 413; // Payload Too Large
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({
@@ -188,22 +238,43 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       // Log the request
       logger.debug('Received request', { method: request.method, id: request.id });
       
-      // Process the request and send response
-      const response = await processRequest(request);
-      
-      res.statusCode = 200;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify(response));
-      
-      // Log the response
-      if (response.error) {
-        logger.error('Request error', { method: request.method, error: response.error });
-      } else {
-        logger.debug('Request completed', { method: request.method, id: request.id });
-      }
+      // Process the request using the request queue
+      requestQueue.enqueue(async () => {
+        try {
+          // Process the request and send response
+          const response = await processRequest(request);
+          
+          clearTimeout(timeoutId);
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(response));
+          
+          // Log the response
+          if (response.error) {
+            logger.error('Request error', { method: request.method, error: response.error });
+          } else {
+            logger.debug('Request completed', { method: request.method, id: request.id });
+          }
+        } catch (error) {
+          clearTimeout(timeoutId);
+          logger.error('Request processing error', error);
+          
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32603,
+              message: 'Internal error: Failed to process request'
+            },
+            id: request.id || null
+          }));
+        }
+      });
     } catch (error) {
       // JSON parse error
-      logger.error('JSON parse error', { body: body.slice(0, 100) });
+      clearTimeout(timeoutId);
+      logger.error('JSON parse error', { body: body.slice(0, 100), error });
       
       res.statusCode = 400;
       res.setHeader('Content-Type', 'application/json');
@@ -218,6 +289,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }
   } catch (error) {
     // Request processing error
+    clearTimeout(timeoutId);
     logger.error('Request processing error', error);
     
     res.statusCode = 500;
@@ -231,6 +303,103 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       id: null
     }));
   }
+}
+
+/**
+ * Handle CORS headers and preflight
+ */
+function handleCors(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  const origin = req.headers.origin;
+  const allowedOrigins = config.allowedOrigins;
+  
+  // Handle CORS based on configuration
+  if (origin) {
+    if (allowedOrigins.includes(origin)) {
+      // Origin is explicitly allowed
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+      res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+      return true;
+    } else if (allowedOrigins.includes('*')) {
+      // Wildcard is allowed (not recommended for production)
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+      res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
+      return true;
+    } else {
+      // Origin is not allowed
+      res.statusCode = 403; // Forbidden
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Origin not allowed'
+        },
+        id: null
+      }));
+      return false;
+    }
+  }
+  
+  // No origin header (non-CORS request)
+  return true;
+}
+
+/**
+ * Check authentication
+ */
+function checkAuthentication(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  if (authManager.isEnabled()) {
+    const apiKey = authManager.extractApiKey(req.headers.authorization) || req.headers['x-api-key'] as string;
+    
+    if (!authManager.verifyApiKey(apiKey)) {
+      res.statusCode = 401; // Unauthorized
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Unauthorized: Invalid or missing API key'
+        },
+        id: null
+      }));
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+/**
+ * Check rate limiting
+ */
+function checkRateLimit(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  if (config.rateLimitEnabled) {
+    const clientIp = (req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+    const apiKey = authManager.extractApiKey(req.headers.authorization) || req.headers['x-api-key'] as string;
+    
+    // Use API key for authenticated requests, IP address for anonymous requests
+    const rateLimitKey = apiKey ? `apikey:${apiKey}` : `ip:${clientIp}`;
+    
+    if (!isWithinRateLimit(rateLimitKey)) {
+      res.statusCode = 429; // Too Many Requests
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        error: {
+          code: -32002,
+          message: 'Too many requests. Please try again later.'
+        },
+        id: null
+      }));
+      return false;
+    }
+  }
+  
+  return true;
 }
 
 /**
@@ -368,13 +537,13 @@ async function routeRequest(method: string, params: Record<string, unknown>): Pr
 /**
  * Check rate limit for a client
  */
-function checkRateLimit(clientIp: string): boolean {
+function isWithinRateLimit(rateLimitKey: string): boolean {
   if (!config.rateLimitEnabled) {
     return true; // Rate limiting disabled
   }
   
   const now = Date.now();
-  let limit = rateLimits.get(clientIp);
+  let limit = rateLimits.get(rateLimitKey);
   
   // Check if this is a new client or the limit has reset
   if (!limit || now > limit.resetTime) {
@@ -382,13 +551,13 @@ function checkRateLimit(clientIp: string): boolean {
       count: 1,
       resetTime: now + config.rateLimitWindow
     };
-    rateLimits.set(clientIp, limit);
+    rateLimits.set(rateLimitKey, limit);
     return true;
   }
   
   // Check if the client has exceeded the limit
   if (limit.count >= config.rateLimitRequests) {
-    logger.warn(`Rate limit exceeded for client ${clientIp}`);
+    logger.warn(`Rate limit exceeded for ${rateLimitKey}`);
     return false;
   }
   
