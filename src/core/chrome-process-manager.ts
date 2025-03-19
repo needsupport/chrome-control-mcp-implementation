@@ -17,6 +17,7 @@ import { EventEmitter } from 'events';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import { retry } from '../utils/retry.js';
 
 const exec = promisify(execCallback);
 
@@ -25,11 +26,22 @@ interface ChromeVersion {
   fullVersion: string;
 }
 
+/**
+ * Chrome process resources usage statistics
+ */
+interface ProcessResourceUsage {
+  cpu: number;  // CPU usage percentage
+  memory: number; // Memory usage in MB
+  uptime: number; // Process uptime in seconds
+}
+
 export interface ChromeProcessInfo {
   pid: number;
   debugPort: number;
   process: ChildProcess;
   userDataDir: string;
+  startTime: number;
+  resourceUsage?: ProcessResourceUsage;
 }
 
 /**
@@ -60,6 +72,16 @@ export interface ChromeProcessManagerEvents {
    * Emitted when there's an error with Chrome process management
    */
   error: (error: Error) => void;
+
+  /**
+   * Emitted when Chrome health status changes
+   */
+  health: (info: ChromeProcessInfo, isHealthy: boolean) => void;
+  
+  /**
+   * Emitted when Chrome's resource usage exceeds thresholds
+   */
+  resource_warning: (info: ChromeProcessInfo, usage: ProcessResourceUsage) => void;
 }
 
 /**
@@ -79,6 +101,38 @@ export interface ChromeProcessManagerOptions {
   headless?: boolean;
   considerGracePeriodMs?: number; // Grace period after which a Chrome exit is considered a crash
   autostart?: boolean; // Whether to start Chrome immediately
+  cpuWarningThreshold?: number; // CPU usage percentage threshold for warnings
+  memoryWarningThreshold?: number; // Memory usage in MB threshold for warnings
+  maxResponseTime?: number; // Maximum time in ms for Chrome to respond to health checks
+}
+
+// Error classes for better error handling
+export class ChromeVersionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChromeVersionError';
+  }
+}
+
+export class ChromeExecutableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChromeExecutableError';
+  }
+}
+
+export class ChromeStartupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChromeStartupError';
+  }
+}
+
+export class ChromeHealthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChromeHealthError';
+  }
 }
 
 /**
@@ -91,9 +145,13 @@ export class ChromeProcessManager extends EventEmitter {
   private options: Required<ChromeProcessManagerOptions>;
   private restartAttempts = 0;
   private monitorIntervalId: NodeJS.Timeout | null = null;
+  private resourceMonitorIntervalId: NodeJS.Timeout | null = null;
   private shuttingDown = false;
   private temporaryDirs: string[] = [];
   private defaultExecutablePath: string;
+  private lastHealthCheckTime = 0;
+  private healthCheckHistory: boolean[] = [];
+  private crashCount = 0;
 
   constructor(options: ChromeProcessManagerOptions = {}) {
     super();
@@ -106,7 +164,7 @@ export class ChromeProcessManager extends EventEmitter {
       userDataDir: options.userDataDir ?? '',
       useTemporaryUserDataDir: options.useTemporaryUserDataDir ?? true,
       startupTimeout: options.startupTimeout ?? 10000,
-      maxRestartAttempts: options.maxRestartAttempts ?? 3,
+      maxRestartAttempts: options.maxRestartAttempts ?? 5,
       restartBackoffMs: options.restartBackoffMs ?? 1000,
       additionalFlags: options.additionalFlags ?? [],
       environmentVars: options.environmentVars ?? {},
@@ -114,6 +172,9 @@ export class ChromeProcessManager extends EventEmitter {
       headless: options.headless ?? (process.env.NODE_ENV !== 'development'),
       considerGracePeriodMs: options.considerGracePeriodMs ?? 3000,
       autostart: options.autostart ?? false,
+      cpuWarningThreshold: options.cpuWarningThreshold ?? 80,
+      memoryWarningThreshold: options.memoryWarningThreshold ?? 2000, // 2GB
+      maxResponseTime: options.maxResponseTime ?? 5000, // 5 seconds
     };
 
     // Set default Chrome executable based on platform
@@ -155,6 +216,16 @@ export class ChromeProcessManager extends EventEmitter {
   }
 
   /**
+   * Get crash statistics
+   */
+  getCrashStatistics(): { count: number, restartAttempts: number } {
+    return {
+      count: this.crashCount,
+      restartAttempts: this.restartAttempts
+    };
+  }
+
+  /**
    * Detect Chrome executable path based on platform
    */
   private detectChromeExecutable(): string {
@@ -165,16 +236,41 @@ export class ChromeProcessManager extends EventEmitter {
     
     try {
       if (process.platform === 'win32') {
-        // Windows
-        return 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+        // Windows - check multiple possible locations
+        const possiblePaths = [
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+          `${os.homedir()}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`
+        ];
+        
+        for (const path of possiblePaths) {
+          if (fs.existsSync(path)) {
+            return path;
+          }
+        }
+        
+        // Default fallback for Windows
+        return 'chrome.exe';
       } else if (process.platform === 'darwin') {
-        // macOS
+        // macOS - check default and user-specific locations
+        const possiblePaths = [
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          `${os.homedir()}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+        ];
+        
+        for (const path of possiblePaths) {
+          if (fs.existsSync(path)) {
+            return path;
+          }
+        }
+        
+        // Default fallback for macOS
         return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
       } else {
-        // Linux
-        for (const exe of ['google-chrome', 'chrome', 'chromium', 'chromium-browser']) {
+        // Linux and others - use which command to find executables
+        for (const exe of ['google-chrome', 'google-chrome-stable', 'chrome', 'chromium', 'chromium-browser']) {
           try {
-            const { stdout } = exec(`which ${exe}`);
+            const { stdout } = await execCallback(`which ${exe}`);
             if (stdout && stdout.trim()) {
               return stdout.trim();
             }
@@ -183,7 +279,20 @@ export class ChromeProcessManager extends EventEmitter {
           }
         }
         
-        // Default fallback
+        // Check common Linux paths
+        const possiblePaths = [
+          '/usr/bin/google-chrome',
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser'
+        ];
+        
+        for (const path of possiblePaths) {
+          if (fs.existsSync(path)) {
+            return path;
+          }
+        }
+        
+        // Default fallback for Linux
         return 'google-chrome';
       }
     } catch (error) {
@@ -205,6 +314,13 @@ export class ChromeProcessManager extends EventEmitter {
     this.logger.info(`Starting Chrome from: ${chromePath}`);
 
     try {
+      // Validate chromePath exists
+      try {
+        await fs.promises.access(chromePath, fs.constants.X_OK);
+      } catch (error) {
+        throw new ChromeExecutableError(`Chrome executable not found or not executable: ${chromePath}`);
+      }
+
       // Check Chrome version first
       await this.checkChromeVersion(chromePath);
 
@@ -212,7 +328,7 @@ export class ChromeProcessManager extends EventEmitter {
       const isPortInUse = await this.isDebugPortInUse();
       if (isPortInUse) {
         this.logger.warn(`Chrome is already running on port ${this.options.debugPort}`);
-        throw new Error(`Debug port ${this.options.debugPort} is already in use`);
+        throw new ChromeStartupError(`Debug port ${this.options.debugPort} is already in use`);
       }
 
       // Create temporary user data directory if needed
@@ -221,7 +337,7 @@ export class ChromeProcessManager extends EventEmitter {
         : this.options.userDataDir;
 
       if (!userDataDir) {
-        throw new Error('User data directory not specified and could not create temporary directory');
+        throw new ChromeStartupError('User data directory not specified and could not create temporary directory');
       }
 
       // Build Chrome flags
@@ -241,6 +357,10 @@ export class ChromeProcessManager extends EventEmitter {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-extensions',
+        '--disable-popup-blocking',
+        '--disable-prompt-on-repost',
+        '--disable-hang-monitor',
+        '--disable-sync'
       );
 
       // Add additional flags
@@ -256,7 +376,7 @@ export class ChromeProcessManager extends EventEmitter {
 
       const pid = this.chromeProcess.pid;
       if (!pid) {
-        throw new Error('Failed to start Chrome (no PID)');
+        throw new ChromeStartupError('Failed to start Chrome (no PID)');
       }
 
       // Set up process event handlers
@@ -275,22 +395,42 @@ export class ChromeProcessManager extends EventEmitter {
         });
       }
 
+      // Record start time
+      const startTime = Date.now();
+
       // Create Chrome process info
       this.chromeInfo = {
         pid,
         debugPort: this.options.debugPort,
         process: this.chromeProcess,
         userDataDir,
+        startTime,
       };
 
       // Wait for Chrome to initialize
-      await this.waitForChromeStartup();
+      await retry(
+        () => this.waitForChromeStartup(),
+        {
+          retries: 3,
+          minTimeout: 1000,
+          factor: 2,
+          onRetry: (error, attempt) => {
+            this.logger.warn(`Retrying Chrome startup (attempt ${attempt}/3): ${error.message}`);
+          }
+        }
+      );
 
-      // Start monitoring Chrome process
+      // Start monitoring Chrome process health
       this.startMonitoring();
+
+      // Start monitoring resource usage
+      this.startResourceMonitoring();
 
       this.logger.info(`Chrome started successfully with PID ${pid}`);
       this.emit('start', this.chromeInfo);
+
+      // Reset restart attempts on successful start
+      this.restartAttempts = 0;
 
       return this.chromeInfo;
     } catch (error) {
@@ -306,7 +446,9 @@ export class ChromeProcessManager extends EventEmitter {
    */
   private async isDebugPortInUse(): Promise<boolean> {
     try {
-      const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`);
+      const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
+        timeout: 2000 // 2 second timeout
+      });
       return response.ok;
     } catch (error) {
       return false;
@@ -318,7 +460,7 @@ export class ChromeProcessManager extends EventEmitter {
    */
   private async createTempDir(): Promise<string> {
     try {
-      const tempDir = path.join(os.tmpdir(), `chrome-control-${Date.now()}`);
+      const tempDir = path.join(os.tmpdir(), `chrome-control-${Date.now()}-${Math.floor(Math.random() * 10000)}`);
       await fs.promises.mkdir(tempDir, { recursive: true });
       this.temporaryDirs.push(tempDir);
       return tempDir;
@@ -338,10 +480,13 @@ export class ChromeProcessManager extends EventEmitter {
       this.chromeProcess = null;
 
       if (!this.shuttingDown) {
-        this.emit('crash', this.chromeInfo!, code, signal);
+        if (this.chromeInfo) {
+          this.emit('crash', this.chromeInfo, code, signal);
+          this.crashCount++;
+        }
         this.handleChromeExit(code, signal);
-      } else {
-        this.emit('stop', this.chromeInfo!);
+      } else if (this.chromeInfo) {
+        this.emit('stop', this.chromeInfo);
       }
     });
 
@@ -397,22 +542,34 @@ export class ChromeProcessManager extends EventEmitter {
     
     while (Date.now() - startTime < timeout) {
       try {
-        const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+        
+        const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
         
         if (response.ok) {
           const version = await response.json();
           this.logger.info(`Chrome initialized: ${JSON.stringify(version)}`);
-          return;
+          
+          // Check browser availability by trying to get the list of targets
+          const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
+          if (targetsResponse.ok) {
+            return;
+          }
         }
       } catch (error) {
         // Ignore errors during startup wait
       }
       
       // Wait a bit before trying again
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
     
-    throw new Error(`Timed out waiting for Chrome to initialize after ${timeout}ms`);
+    throw new ChromeStartupError(`Timed out waiting for Chrome to initialize after ${timeout}ms`);
   }
 
   /**
@@ -431,41 +588,206 @@ export class ChromeProcessManager extends EventEmitter {
   }
 
   /**
+   * Start monitoring Chrome resource usage
+   */
+  private startResourceMonitoring(): void {
+    if (!this.chromeInfo || !this.chromeProcess) return;
+    
+    if (this.resourceMonitorIntervalId) {
+      clearInterval(this.resourceMonitorIntervalId);
+    }
+    
+    this.resourceMonitorIntervalId = setInterval(async () => {
+      try {
+        if (!this.chromeProcess || !this.chromeInfo) return;
+        
+        // Get process resource usage
+        const usage = await this.getProcessResourceUsage(this.chromeInfo.pid);
+        
+        if (!usage) return;
+        
+        // Update process info with resource usage
+        this.chromeInfo.resourceUsage = usage;
+        
+        // Check if resource usage exceeds thresholds
+        if (usage.cpu > this.options.cpuWarningThreshold) {
+          this.logger.warn(`Chrome CPU usage is high: ${usage.cpu.toFixed(1)}%`);
+          this.emit('resource_warning', this.chromeInfo, usage);
+        }
+        
+        if (usage.memory > this.options.memoryWarningThreshold) {
+          this.logger.warn(`Chrome memory usage is high: ${usage.memory.toFixed(1)}MB`);
+          this.emit('resource_warning', this.chromeInfo, usage);
+        }
+      } catch (error) {
+        this.logger.debug('Error monitoring Chrome resources', error);
+      }
+    }, 10000); // Every 10 seconds
+  }
+
+  /**
+   * Get process resource usage
+   */
+  private async getProcessResourceUsage(pid: number): Promise<ProcessResourceUsage | null> {
+    try {
+      // Different approaches depending on platform
+      if (process.platform === 'win32') {
+        // Windows - use wmic
+        const { stdout } = await exec(`wmic process where ProcessId=${pid} get WorkingSetSize,UserModeTime,CreationDate /format:csv`);
+        
+        const lines = stdout.trim().split('\n');
+        if (lines.length < 2) return null;
+        
+        const parts = lines[1].split(',');
+        if (parts.length < 4) return null;
+        
+        const workingSetSize = parseInt(parts[2], 10) / (1024 * 1024); // Convert to MB
+        const userModeTime = parseInt(parts[3], 10) / 10000000; // Convert to seconds
+        
+        return {
+          cpu: 0, // Not accurate on Windows without multiple samples
+          memory: workingSetSize,
+          uptime: userModeTime
+        };
+      } else if (process.platform === 'darwin' || process.platform === 'linux') {
+        // macOS/Linux - use ps
+        const cmd = process.platform === 'darwin'
+          ? `ps -p ${pid} -o %cpu,%mem,rss,etime`
+          : `ps -p ${pid} -o %cpu,%mem,rss,etimes --no-headers`;
+        
+        const { stdout } = await exec(cmd);
+        const parts = stdout.trim().split(/\s+/);
+        
+        if (parts.length < 4) return null;
+        
+        const cpu = parseFloat(parts[0]);
+        const memory = parseInt(parts[2], 10) / 1024; // Convert KB to MB
+        const uptime = process.platform === 'darwin'
+          ? this.parseEtime(parts[3])
+          : parseInt(parts[3], 10);
+        
+        return { cpu, memory, uptime };
+      }
+      
+      return null;
+    } catch (error) {
+      this.logger.debug(`Error getting resource usage for PID ${pid}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Parse etime format from ps (e.g., "2-03:45:12" -> seconds)
+   */
+  private parseEtime(etime: string): number {
+    try {
+      // Format can be [[dd-]hh:]mm:ss
+      const parts = etime.split('-');
+      let days = 0;
+      let timeStr = etime;
+      
+      if (parts.length > 1) {
+        days = parseInt(parts[0], 10);
+        timeStr = parts[1];
+      }
+      
+      const timeParts = timeStr.split(':');
+      let seconds = 0;
+      
+      if (timeParts.length === 3) {
+        // hh:mm:ss
+        seconds = parseInt(timeParts[0], 10) * 3600 + parseInt(timeParts[1], 10) * 60 + parseInt(timeParts[2], 10);
+      } else if (timeParts.length === 2) {
+        // mm:ss
+        seconds = parseInt(timeParts[0], 10) * 60 + parseInt(timeParts[1], 10);
+      } else {
+        // ss
+        seconds = parseInt(timeParts[0], 10);
+      }
+      
+      return days * 86400 + seconds;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  /**
    * Check Chrome process health
    */
-  private async checkChromeHealth(): Promise<void> {
+  private async checkChromeHealth(): Promise<boolean> {
     if (!this.isRunning()) {
-      return;
+      return false;
     }
+    
+    this.lastHealthCheckTime = Date.now();
+    let isHealthy = false;
     
     try {
       // Check if Chrome is responsive
-      const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
       
-      if (!response.ok) {
-        this.logger.warn('Chrome is not responding properly');
-        // Process is running but not responding properly
-        await this.restart();
+      const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        // Also check if targets are available (a good indicator of Chrome health)
+        const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
+        isHealthy = targetsResponse.ok;
+      } else {
+        isHealthy = false;
       }
     } catch (error) {
       this.logger.warn('Error checking Chrome health', error);
+      isHealthy = false;
       
       if (this.chromeProcess) {
         // Check if process is still running by sending a signal (0)
         try {
           process.kill(this.chromeProcess.pid!, 0);
           this.logger.info('Chrome process is running but not responsive');
-          
           // Process is running but not responding
-          await this.restart();
         } catch (err) {
           // Process is not running
           this.logger.warn('Chrome process is not running anymore');
           this.chromeProcess = null;
           // Will be handled by exit event automatically
+          return false;
         }
       }
     }
+    
+    // Update health check history (keep last 5 checks for trending)
+    this.healthCheckHistory.push(isHealthy);
+    if (this.healthCheckHistory.length > 5) {
+      this.healthCheckHistory.shift();
+    }
+    
+    // Check health trend (if 3 or more checks are unhealthy, restart)
+    const unhealthyChecks = this.healthCheckHistory.filter(h => !h).length;
+    
+    if (this.chromeInfo) {
+      if (unhealthyChecks >= 3) {
+        this.logger.warn(`Chrome health check failing consistently (${unhealthyChecks}/5 checks failed)`);
+        this.emit('health', this.chromeInfo, false);
+        
+        // Restart Chrome if it's consistently unhealthy
+        await this.restart();
+        return false;
+      } else if (!isHealthy) {
+        this.logger.warn('Chrome health check failed, will monitor for consistent failures');
+        this.emit('health', this.chromeInfo, false);
+        return false;
+      } else {
+        this.emit('health', this.chromeInfo, true);
+        return true;
+      }
+    }
+    
+    return isHealthy;
   }
 
   /**
@@ -478,6 +800,9 @@ export class ChromeProcessManager extends EventEmitter {
     
     // Wait a bit before restarting
     await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Reset health check history
+    this.healthCheckHistory = [];
     
     return this.start();
   }
@@ -502,8 +827,29 @@ export class ChromeProcessManager extends EventEmitter {
       this.monitorIntervalId = null;
     }
     
+    if (this.resourceMonitorIntervalId) {
+      clearInterval(this.resourceMonitorIntervalId);
+      this.resourceMonitorIntervalId = null;
+    }
+    
     // Try to terminate gracefully
     try {
+      // First try to close all pages via CDP
+      try {
+        const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
+        if (targetsResponse.ok) {
+          const targets = await targetsResponse.json();
+          for (const target of targets) {
+            if (target.type === 'page' && target.id) {
+              await fetch(`http://localhost:${this.options.debugPort}/json/close/${target.id}`);
+            }
+          }
+        }
+      } catch (error) {
+        this.logger.debug('Error closing Chrome tabs', error);
+      }
+      
+      // Then try to terminate the process
       // On Windows, we use CTRL_BREAK_EVENT (1) which helps with cleaner child process termination
       if (process.platform === 'win32') {
         this.chromeProcess.kill('SIGBREAK');
@@ -518,18 +864,33 @@ export class ChromeProcessManager extends EventEmitter {
           
           try {
             // Force kill if process doesn't exit gracefully
-            this.chromeProcess!.kill('SIGKILL');
+            if (this.chromeProcess && this.chromeProcess.pid) {
+              if (process.platform === 'win32') {
+                // On Windows, we need to use taskkill for force kill
+                exec(`taskkill /F /PID ${this.chromeProcess.pid}`).catch(e => {
+                  this.logger.debug(`Error in taskkill: ${e.message}`);
+                });
+              } else {
+                this.chromeProcess.kill('SIGKILL');
+              }
+            }
           } catch (error) {
             // Ignore errors when killing the process
+            this.logger.debug('Error during force kill', error);
           }
           
           resolve();
         }, 5000);
         
-        this.chromeProcess!.once('exit', () => {
+        if (this.chromeProcess) {
+          this.chromeProcess.once('exit', () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+        } else {
           clearTimeout(timeout);
           resolve();
-        });
+        }
       });
       
     } catch (error) {
@@ -558,6 +919,11 @@ export class ChromeProcessManager extends EventEmitter {
       this.monitorIntervalId = null;
     }
     
+    if (this.resourceMonitorIntervalId) {
+      clearInterval(this.resourceMonitorIntervalId);
+      this.resourceMonitorIntervalId = null;
+    }
+    
     // Stop Chrome
     await this.stop();
     
@@ -581,10 +947,23 @@ export class ChromeProcessManager extends EventEmitter {
         this.logger.debug(`Removed temporary directory: ${dir}`);
       } catch (error) {
         this.logger.warn(`Failed to remove temporary directory: ${dir}`, error);
+        
+        // On Windows, sometimes files are locked, so we need to retry with a delay
+        if (process.platform === 'win32') {
+          setTimeout(async () => {
+            try {
+              await fs.promises.rm(dir, { recursive: true, force: true });
+              this.logger.debug(`Removed temporary directory on retry: ${dir}`);
+            } catch (retryError) {
+              this.logger.warn(`Failed to remove temporary directory on retry: ${dir}`, retryError);
+            }
+          }, 2000);
+        }
       }
     }
     
     this.temporaryDirs = [];
+    this.healthCheckHistory = [];
   }
 
   /**
@@ -595,7 +974,8 @@ export class ChromeProcessManager extends EventEmitter {
       const { stdout } = await exec(`"${executablePath}" --version`);
       const versionOutput = stdout.trim();
       
-      const versionMatch = versionOutput.match(/Chrome\s+(\d+)\.(\d+)\.(\d+)\.(\d+)/i);
+      // Support different version string formats
+      const versionMatch = versionOutput.match(/(?:Chrome|Chromium)\s+(?:version\s+)?(\d+)(?:\.(\d+)(?:\.(\d+)(?:\.(\d+))?)?)?/i);
       
       if (versionMatch) {
         const majorVersion = parseInt(versionMatch[1], 10);
@@ -604,16 +984,47 @@ export class ChromeProcessManager extends EventEmitter {
         this.logger.info(`Detected Chrome version: ${fullVersion} (major: ${majorVersion})`);
         
         if (majorVersion < this.options.minVersion) {
-          throw new Error(`Chrome version ${majorVersion} is too old. Minimum required version is ${this.options.minVersion}`);
+          throw new ChromeVersionError(`Chrome version ${majorVersion} is too old. Minimum required version is ${this.options.minVersion}`);
         }
         
         return { majorVersion, fullVersion };
       } else {
-        throw new Error(`Could not parse Chrome version from: ${versionOutput}`);
+        this.logger.warn(`Unrecognized Chrome version output: ${versionOutput}`);
+        // Try to continue anyway as the version check might be failing due to different output format
+        return { majorVersion: 0, fullVersion: versionOutput };
       }
     } catch (error) {
+      if (error instanceof ChromeVersionError) {
+        throw error;
+      }
+      
       this.logger.warn('Error checking Chrome version', error);
-      throw new Error(`Failed to check Chrome version: ${error.message}`);
+      
+      if (error.message && error.message.includes('Command failed')) {
+        throw new ChromeExecutableError(`Chrome executable not found or not valid: ${executablePath}`);
+      }
+      
+      throw new ChromeVersionError(`Failed to check Chrome version: ${error.message}`);
     }
+  }
+
+  /**
+   * Reset system state (for recovery after errors)
+   */
+  async reset(): Promise<void> {
+    this.logger.info('Resetting Chrome Process Manager state...');
+    
+    // Stop and clean up everything
+    await this.shutdown();
+    
+    // Reset all state variables
+    this.restartAttempts = 0;
+    this.crashCount = 0;
+    this.healthCheckHistory = [];
+    this.shuttingDown = false;
+    this.chromeProcess = null;
+    this.chromeInfo = null;
+    
+    this.logger.info('Chrome Process Manager state reset complete');
   }
 }
