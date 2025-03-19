@@ -38,7 +38,7 @@ export async function retry<T>(
   } = options;
   
   let attempt = 0;
-  let lastError: Error;
+  let lastError: Error = new Error('Unknown error');
 
   while (attempt <= retries) {
     try {
@@ -115,7 +115,10 @@ export async function withRetry<T>(
   }
 
   // This should never be reached due to the throw in the catch block
-  throw lastError || new Error(`${name} failed for unknown reason`);
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error(`${name} failed for unknown reason`);
 }
 
 /**
@@ -155,7 +158,7 @@ export async function withTimeout<T>(
  */
 export async function withMutex<T>(
   mutex: Mutex,
-  operation: (release: MutexInterface.Release) => Promise<T>,
+  operation: (release: MutexInterface.Releaser) => Promise<T>,
   options: {
     name?: string;
     timeoutMs?: number;
@@ -170,7 +173,7 @@ export async function withMutex<T>(
   const mutexPromise = mutex.acquire();
   
   // Create a promise that rejects after the timeout
-  const timeoutPromise = new Promise<MutexInterface.Release>((_, reject) => {
+  const timeoutPromise = new Promise<MutexInterface.Releaser>((_, reject) => {
     setTimeout(() => {
       reject(new Error(`Timed out waiting for mutex: ${name}`));
     }, timeoutMs);
