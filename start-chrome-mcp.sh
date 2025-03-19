@@ -1,107 +1,56 @@
 #!/bin/bash
 
-# Start Chrome Control MCP Server
-# This script handles the launch of Chrome with appropriate debugging flags
-# and starts the MCP server
+# Chrome Control MCP Server - Startup Script
+# Handles the setup, build and startup of the MCP server
+
+set -e  # Exit on error
 
 # Set execute permissions for this script if not already set
 chmod +x "$0"
 
-# Configuration
+# Configuration (can be overridden with environment variables)
+SERVER_PORT=${PORT:-3001}
 CHROME_DEBUG_PORT=${CHROME_DEBUGGING_PORT:-9222}
 NODE_ENV=${NODE_ENV:-development}
-CHROME_USER_DATA_DIR=$(mktemp -d)
-CHROME_PID_FILE=".chrome_pid"
-MIN_CHROME_VERSION=115
-RETRY_MAX=3
-RETRY_DELAY=2
+LOG_LEVEL=${LOG_LEVEL:-info}
+MANAGE_CHROME=${MANAGE_CHROME_PROCESS:-true}
+HEALTH_CHECK_PATH=${HEALTHCHECK_PATH:-/health}
+BUILD_FIRST=${BUILD_FIRST:-true}
 
-# Log functions
-log_info() { echo -e "\e[34m[INFO]\e[0m $1"; }
-log_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; }
-log_warning() { echo -e "\e[33m[WARNING]\e[0m $1"; }
-log_error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
+# Log functions with timestamps
+log_info() { echo -e "\e[34m[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]\e[0m $1"; }
+log_success() { echo -e "\e[32m[$(date '+%Y-%m-%d %H:%M:%S')] [SUCCESS]\e[0m $1"; }
+log_warning() { echo -e "\e[33m[$(date '+%Y-%m-%d %H:%M:%S')] [WARNING]\e[0m $1"; }
+log_error() { echo -e "\e[31m[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR]\e[0m $1"; }
 
-# Detect Chrome executable based on platform
-detect_chrome_executable() {
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
-    echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-    # Windows
-    echo "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-  else
-    # Linux and others
-    for exe in google-chrome chrome chromium chromium-browser; do
-      if command -v "$exe" > /dev/null; then
-        echo "$exe"
-        return
-      fi
-    done
-    log_error "Chrome executable not found"
-    exit 1
-  fi
-}
+# Print banner
+echo -e "\e[36m"
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║                  Chrome Control MCP Server                     ║" 
+echo "║                                                               ║"
+echo "║  Efficient web browsing capabilities for AI assistants        ║"
+echo "║  without relying on screenshots                               ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
+echo -e "\e[0m"
 
-# Check Chrome version
-check_chrome_version() {
-  local chrome_exe="$1"
-  local version_output
-  
-  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-    # Windows
-    version_output=$("$chrome_exe" --version 2> /dev/null)
-  else
-    # Linux/macOS
-    version_output=$("$chrome_exe" --version 2> /dev/null)
-  fi
-  
-  # Extract version number
-  local chrome_version
-  if [[ $version_output =~ Chrome[[:space:]]+([0-9]+) ]]; then
-    chrome_version="${BASH_REMATCH[1]}"
-    log_info "Detected Chrome version: $chrome_version"
-    
-    if (( chrome_version < MIN_CHROME_VERSION )); then
-      log_error "Chrome version $chrome_version is too old. Minimum required version is $MIN_CHROME_VERSION"
-      exit 1
-    fi
-  else
-    log_warning "Could not determine Chrome version, continuing anyway"
-  fi
-}
-
-# Cleanup function
+# Setup cleanup function to ensure proper shutdown
 cleanup() {
-  log_info "Cleaning up resources..."
+  log_info "Shutting down gracefully..."
   
-  # Kill Chrome if we started it
-  if [[ -f "$CHROME_PID_FILE" ]]; then
-    local pid
-    pid=$(cat "$CHROME_PID_FILE")
-    if ps -p "$pid" > /dev/null; then
-      log_info "Stopping Chrome (PID: $pid)"
-      kill "$pid" 2> /dev/null || true
-      sleep 1
-      # Force kill if still running
-      if ps -p "$pid" > /dev/null; then
-        log_info "Force stopping Chrome (PID: $pid)"
-        kill -9 "$pid" 2> /dev/null || true
-      fi
+  # Check if a server PID file exists and kill the process
+  if [[ -f ".server.pid" ]]; then
+    SERVER_PID=$(cat .server.pid)
+    if ps -p "$SERVER_PID" > /dev/null; then
+      log_info "Stopping server process (PID: $SERVER_PID)"
+      kill "$SERVER_PID" 2>/dev/null || true
     fi
-    rm "$CHROME_PID_FILE"
-  fi
-  
-  # Clean up temporary directory
-  if [[ -d "$CHROME_USER_DATA_DIR" ]]; then
-    log_info "Removing temporary Chrome profile: $CHROME_USER_DATA_DIR"
-    rm -rf "$CHROME_USER_DATA_DIR"
+    rm -f .server.pid
   fi
   
   log_info "Cleanup complete"
 }
 
-# Set trap for cleanup
+# Register cleanup on exit
 trap cleanup EXIT INT TERM
 
 # Check if Node.js is installed
@@ -111,74 +60,81 @@ if ! command -v node &> /dev/null; then
     exit 1
 fi
 
-# Check if necessary directories exist
+# Print Node.js information
+NODE_VERSION=$(node -v)
+log_info "Using Node.js $NODE_VERSION"
+
+# Check if necessary directories exist and install dependencies if needed
 if [ ! -d "node_modules" ]; then
     log_info "Installing dependencies..."
-    npm ci || npm install
-fi
-
-# Build TypeScript code
-log_info "Building TypeScript code..."
-npm run build || { 
-  log_error "Build failed"
-  exit 1
-}
-
-# Find Chrome executable
-CHROME_EXECUTABLE=${CHROME_EXECUTABLE:-$(detect_chrome_executable)}
-log_info "Using Chrome executable: $CHROME_EXECUTABLE"
-
-# Check Chrome version
-check_chrome_version "$CHROME_EXECUTABLE"
-
-# Check if Chrome is already running on debug port
-log_info "Checking if Chrome is already running on debug port $CHROME_DEBUG_PORT..."
-if curl -s "http://localhost:$CHROME_DEBUG_PORT/json/version" > /dev/null; then
-  log_info "Chrome is already running with remote debugging on port $CHROME_DEBUG_PORT"
-else
-  log_info "Starting Chrome with remote debugging on port $CHROME_DEBUG_PORT..."
-  
-  # Set up Chrome flags
-  CHROME_FLAGS="--remote-debugging-port=$CHROME_DEBUG_PORT"
-  CHROME_FLAGS+=" --user-data-dir=$CHROME_USER_DATA_DIR"
-  
-  # Add headless flag in non-development environment
-  if [[ "$NODE_ENV" != "development" ]]; then
-    CHROME_FLAGS+=" --headless=new"
-  fi
-  
-  # Additional flags for better performance and security
-  CHROME_FLAGS+=" --disable-gpu"
-  CHROME_FLAGS+=" --no-first-run"
-  CHROME_FLAGS+=" --no-default-browser-check"
-  CHROME_FLAGS+=" --disable-extensions"
-
-  # Start Chrome in the background
-  "$CHROME_EXECUTABLE" $CHROME_FLAGS &
-  CHROME_PID=$!
-  echo $CHROME_PID > "$CHROME_PID_FILE"
-  log_info "Chrome started with PID: $CHROME_PID"
-  
-  # Wait for Chrome to initialize and verify it's running
-  for i in $(seq 1 $RETRY_MAX); do
-    sleep $RETRY_DELAY
-    if curl -s "http://localhost:$CHROME_DEBUG_PORT/json/version" > /dev/null; then
-      log_success "Chrome is now running with remote debugging"
-      break
-    fi
     
-    if [[ $i == $RETRY_MAX ]]; then
-      log_error "Failed to start Chrome with debugging enabled after $RETRY_MAX attempts"
-      exit 1
+    if command -v npm &> /dev/null; then
+        npm ci || npm install
     else
-      log_warning "Waiting for Chrome to initialize (attempt $i of $RETRY_MAX)..."
+        log_error "npm is not available"
+        exit 1
     fi
-  done
 fi
 
-# Set environment variable for the server
+# Build TypeScript code if needed
+if [ "$BUILD_FIRST" == "true" ]; then
+    log_info "Building TypeScript code..."
+    npm run build || { 
+        log_error "Build failed"
+        exit 1
+    }
+    log_success "Build completed successfully"
+fi
+
+# Define environment variables for the server
+export PORT=$SERVER_PORT
 export CHROME_DEBUGGING_PORT=$CHROME_DEBUG_PORT
+export MANAGE_CHROME_PROCESS=$MANAGE_CHROME
+export LOG_LEVEL=$LOG_LEVEL
+export NODE_ENV=$NODE_ENV
 
 # Start the server
-log_info "Starting Chrome Control MCP server..."
-node dist/index.js
+log_info "Starting Chrome Control MCP server on port $SERVER_PORT..."
+log_info "Chrome Process Management: $MANAGE_CHROME"
+
+# Check if running in development mode
+if [ "$NODE_ENV" == "development" ]; then
+    log_info "Running in development mode with live code reload"
+    npx ts-node-esm src/index.ts &
+else
+    log_info "Running in production mode"
+    node dist/index.js &
+fi
+
+# Save the server PID
+SERVER_PID=$!
+echo $SERVER_PID > .server.pid
+log_info "Server started with PID: $SERVER_PID"
+
+# Wait for the server to start
+log_info "Waiting for server to start..."
+MAX_RETRIES=10
+RETRY_DELAY=1
+started=false
+
+for i in $(seq 1 $MAX_RETRIES); do
+    if curl -s "http://localhost:$SERVER_PORT$HEALTH_CHECK_PATH" > /dev/null; then
+        started=true
+        break
+    fi
+    log_info "Waiting for server to start (attempt $i of $MAX_RETRIES)..."
+    sleep $RETRY_DELAY
+done
+
+if [ "$started" = true ]; then
+    log_success "Chrome Control MCP server started successfully"
+    log_info "Server: http://localhost:$SERVER_PORT"
+    log_info "Health check: http://localhost:$SERVER_PORT$HEALTH_CHECK_PATH"
+    log_info "Chrome debug: http://localhost:$CHROME_DEBUG_PORT"
+    
+    # Wait for the server process to finish
+    wait $SERVER_PID
+else
+    log_error "Server failed to start after $MAX_RETRIES attempts"
+    exit 1
+fi
