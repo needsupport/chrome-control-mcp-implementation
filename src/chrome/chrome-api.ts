@@ -13,6 +13,9 @@ import { DOMObserver } from '../dom/dom-mutation-observer.js';
 import { CacheSystem } from '../cache/cache-system.js';
 import { Logger } from '../logging/logger.js';
 import { config } from '../config.js';
+import { SemanticAnalyzer } from '../dom/semantic-analyzer.js';
+import { ContentExtractor } from '../dom/content-extractor.js';
+import { Mutex } from 'async-mutex';
 
 /**
  * Main API class for Chrome Control MCP
@@ -22,12 +25,20 @@ export class ChromeAPI {
   private tabManager: TabManager;
   private domObserver: DOMObserver;
   private cacheSystem: CacheSystem;
+  private semanticAnalyzer: SemanticAnalyzer;
+  private contentExtractor: ContentExtractor;
+  private mutex: Mutex;
 
   constructor() {
     this.logger = new Logger('chrome-api');
     this.tabManager = new TabManager();
     this.domObserver = new DOMObserver();
     this.cacheSystem = new CacheSystem();
+    this.mutex = new Mutex();
+    
+    // Initialize semantic analyzer and content extractor
+    this.semanticAnalyzer = new SemanticAnalyzer();
+    this.contentExtractor = new ContentExtractor(this.semanticAnalyzer);
     
     // Connect the DOM observer to the cache system
     this.cacheSystem.connectDOMObserver(this.domObserver);
@@ -297,18 +308,20 @@ export class ChromeAPI {
    * Get a structured representation of the page content
    */
   async getStructuredContent(tabId: string): Promise<{ content: PageContent }> {
-    this.logger.debug('Getting structured content', { tabId });
-    
-    // Check cache first
-    const cacheKey = `structured-content:${tabId}`;
-    const cachedContent = this.cacheSystem.get<PageContent>(cacheKey);
-    
-    if (cachedContent) {
-      this.logger.debug('Returning cached structured content', { tabId });
-      return { content: cachedContent };
-    }
+    const release = await this.mutex.acquire();
     
     try {
+      this.logger.debug('Getting structured content', { tabId });
+      
+      // Check cache first
+      const cacheKey = `structured-content:${tabId}`;
+      const cachedContent = this.cacheSystem.get<PageContent>(cacheKey);
+      
+      if (cachedContent) {
+        this.logger.debug('Returning cached structured content', { tabId });
+        return { content: cachedContent };
+      }
+      
       // Verify tab exists
       if (!this.tabManager.hasTab(tabId)) {
         throw new Error(`Tab ${tabId} not found`);
@@ -317,43 +330,11 @@ export class ChromeAPI {
       // Get the client
       const client = this.tabManager.getTabClient(tabId);
       
-      // Extract structured content (placeholder)
-      // In a real implementation, this would use ContentExtractor and SemanticAnalyzer
-      const { result } = await client.Runtime.evaluate({
-        expression: `
-          (function() {
-            const title = document.title;
-            const url = window.location.href;
-            const meta = {};
-            
-            // Extract metadata
-            document.querySelectorAll('meta').forEach(metaEl => {
-              const name = metaEl.getAttribute('name') || metaEl.getAttribute('property');
-              const content = metaEl.getAttribute('content');
-              if (name && content) meta[name] = content;
-            });
-            
-            // Extract main content (simple implementation)
-            const mainEl = document.querySelector('main') || document.querySelector('article') || document.body;
-            const mainText = mainEl.textContent.trim();
-            
-            return {
-              title,
-              url,
-              metaData: meta,
-              mainContent: {
-                type: 'text',
-                text: mainText,
-                importance: 90,
-                children: []
-              }
-            };
-          })()
-        `,
-        returnByValue: true
-      });
+      // Get the semantic model first (or use cached version)
+      const { semanticModel } = await this.analyzePageSemantics(tabId);
       
-      const content = result.value as PageContent;
+      // Use ContentExtractor to extract structured content
+      const content = await this.contentExtractor.extractContent(client, tabId, semanticModel);
       
       // Cache the content
       this.cacheSystem.set(cacheKey, content, { tabId });
@@ -362,6 +343,8 @@ export class ChromeAPI {
     } catch (error) {
       this.logger.error('Structured content error', { tabId, error });
       throw new Error(`Failed to get structured content: ${error.message}`);
+    } finally {
+      release();
     }
   }
 
@@ -369,18 +352,20 @@ export class ChromeAPI {
    * Analyze the page and build a semantic DOM model
    */
   async analyzePageSemantics(tabId: string): Promise<{ semanticModel: SemanticElement[] }> {
-    this.logger.debug('Analyzing page semantics', { tabId });
-    
-    // Check cache first
-    const cacheKey = `semantic-model:${tabId}`;
-    const cachedModel = this.cacheSystem.get<SemanticElement[]>(cacheKey);
-    
-    if (cachedModel) {
-      this.logger.debug('Returning cached semantic model', { tabId });
-      return { semanticModel: cachedModel };
-    }
+    const release = await this.mutex.acquire();
     
     try {
+      this.logger.debug('Analyzing page semantics', { tabId });
+      
+      // Check cache first
+      const cacheKey = `semantic-model:${tabId}`;
+      const cachedModel = this.cacheSystem.get<SemanticElement[]>(cacheKey);
+      
+      if (cachedModel) {
+        this.logger.debug('Returning cached semantic model', { tabId });
+        return { semanticModel: cachedModel };
+      }
+      
       // Verify tab exists
       if (!this.tabManager.hasTab(tabId)) {
         throw new Error(`Tab ${tabId} not found`);
@@ -389,60 +374,8 @@ export class ChromeAPI {
       // Get the client
       const client = this.tabManager.getTabClient(tabId);
       
-      // Extract semantic model (placeholder)
-      // In a real implementation, this would use SemanticAnalyzer
-      const { result } = await client.Runtime.evaluate({
-        expression: `
-          (function() {
-            const semanticElements = [];
-            const idCounter = 0;
-            
-            // Process interactive elements
-            document.querySelectorAll('a, button, input, select, textarea').forEach(el => {
-              const id = 'semantic-' + (idCounter++);
-              const tagName = el.tagName.toLowerCase();
-              const text = el.textContent.trim() || el.getAttribute('placeholder') || el.getAttribute('aria-label') || '';
-              
-              let type = 'other';
-              if (tagName === 'a') type = 'link';
-              else if (tagName === 'button') type = 'button';
-              else if (tagName === 'input') {
-                const inputType = el.type;
-                if (inputType === 'button' || inputType === 'submit') type = 'button';
-                else if (inputType === 'checkbox') type = 'checkbox';
-                else if (inputType === 'radio') type = 'radio';
-                else type = 'input';
-              }
-              else if (tagName === 'select') type = 'select';
-              else if (tagName === 'textarea') type = 'input';
-              
-              // Gather attributes
-              const attrs = {};
-              Array.from(el.attributes).forEach(attr => {
-                attrs[attr.name] = attr.value;
-              });
-              
-              // Create semantic element
-              semanticElements.push({
-                semanticId: id,
-                elementType: type,
-                nodeId: 0, // Placeholder (CDP IDs aren't available in pure JS)
-                backendNodeId: 0, // Placeholder
-                text,
-                importance: type === 'link' || type === 'button' ? 80 : 50,
-                childIds: [],
-                attributes: attrs,
-                role: el.getAttribute('role') || ''
-              });
-            });
-            
-            return semanticElements;
-          })()
-        `,
-        returnByValue: true
-      });
-      
-      const semanticModel = result.value as SemanticElement[];
+      // Use SemanticAnalyzer to analyze the page
+      const semanticModel = await this.semanticAnalyzer.analyzePage(client, tabId);
       
       // Cache the model
       this.cacheSystem.set(cacheKey, semanticModel, { tabId });
@@ -451,6 +384,8 @@ export class ChromeAPI {
     } catch (error) {
       this.logger.error('Semantic analysis error', { tabId, error });
       throw new Error(`Failed to analyze page semantics: ${error.message}`);
+    } finally {
+      release();
     }
   }
 
@@ -464,10 +399,8 @@ export class ChromeAPI {
       // First, get the semantic model (or generate it if not cached)
       const { semanticModel } = await this.analyzePageSemantics(tabId);
       
-      // Filter for elements containing the specified text
-      const elements = semanticModel.filter(element => 
-        element.text.toLowerCase().includes(text.toLowerCase())
-      );
+      // Use the semantic analyzer to find elements by text
+      const elements = await this.semanticAnalyzer.findElementsByText(semanticModel, text);
       
       return { elements };
     } catch (error) {
@@ -489,9 +422,10 @@ export class ChromeAPI {
       // Define clickable element types
       const clickableTypes = ['button', 'link', 'checkbox', 'radio', 'select'];
       
-      // Filter for clickable elements
-      const elements = semanticModel.filter(element => 
-        clickableTypes.includes(element.elementType)
+      // Use the semantic analyzer to find elements by type
+      const elements = this.semanticAnalyzer.findElementsByType(
+        semanticModel, 
+        clickableTypes.map(type => type as any) // Cast to ElementType
       );
       
       return { elements };
@@ -518,20 +452,8 @@ export class ChromeAPI {
         throw new Error(`Element with semantic ID ${semanticId} not found`);
       }
       
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Create a css selector to find the element (based on attributes if possible)
-      let selector = '';
-      if (element.attributes.id) {
-        selector = `#${element.attributes.id}`;
-      } else if (element.attributes.class) {
-        const classes = element.attributes.class.split(' ').map(c => `.${c}`).join('');
-        selector = `${element.elementType}${classes}`;
-      } else {
-        // Custom selector that contains text (less reliable)
-        selector = `//*[contains(text(),'${element.text}')]`;
-      }
+      // Get a CSS selector for the element
+      const selector = this.semanticAnalyzer.createSelector(element);
       
       // Click the element using existing method
       const result = await this.clickElement(tabId, selector);
@@ -571,18 +493,8 @@ export class ChromeAPI {
       // Get the client
       const client = this.tabManager.getTabClient(tabId);
       
-      // Create a selector for this element (similar to clickSemanticElement)
-      let selector = '';
-      if (element.attributes.id) {
-        selector = `#${element.attributes.id}`;
-      } else if (element.attributes.name) {
-        selector = `[name="${element.attributes.name}"]`;
-      } else if (element.attributes.class) {
-        const classes = element.attributes.class.split(' ').map(c => `.${c}`).join('');
-        selector = `${element.elementType}${classes}`;
-      } else {
-        throw new Error(`Cannot create reliable selector for element ${semanticId}`);
-      }
+      // Get a CSS selector for the element
+      const selector = this.semanticAnalyzer.createSelector(element);
       
       // Fill the field
       const result = await client.Runtime.evaluate({
