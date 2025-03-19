@@ -11,6 +11,8 @@ import { Logger } from '../logging/logger.js';
 import { AuthManager } from './auth.js';
 import { config } from '../config.js';
 import { RequestQueue } from '../utils/request-queue.js';
+import { handleHealthCheck } from './health-check.js';
+import { performance } from 'perf_hooks';
 
 // Initialize components
 const logger = new Logger('server');
@@ -28,10 +30,16 @@ const rateLimits = new Map<string, RateLimitData>();
 // Server instance
 let serverInstance: http.Server | null = null;
 
+// Track server metrics
+let requestCount = 0;
+let errorCount = 0;
+let startTime = 0;
+
 /**
  * Start the MCP server on the specified port
  */
 export function startServer(port: number): http.Server {
+  startTime = Date.now();
   const server = http.createServer(handleRequest);
   serverInstance = server;
   
@@ -62,21 +70,18 @@ export function startServer(port: number): http.Server {
     logger.error('Server error', error);
   });
   
-  // Add health check endpoint if enabled
-  if (config.healthcheckEnabled) {
-    server.on('request', (req, res) => {
-      if (req.url === config.healthcheckPath && req.method === 'GET') {
-        res.statusCode = 200;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ 
-          status: 'ok', 
-          timestamp: Date.now(),
-          version: '1.0.0',
-          uptime: process.uptime()
-        }));
-      }
-    });
-  }
+  // Add request handler for all requests
+  server.on('request', (req, res) => {
+    // First check health endpoints
+    if (handleHealthCheck(req, res)) {
+      return; // Request was handled by health check
+    }
+    
+    // For metrics tracking
+    if (req.method === 'POST') {
+      requestCount++;
+    }
+  });
   
   // Start clean-up timer for rate limiting
   setInterval(() => cleanupRateLimits(), 60000);
@@ -89,6 +94,7 @@ export function startServer(port: number): http.Server {
  */
 export async function shutdownServer(): Promise<void> {
   logger.info('Shutting down server...');
+  const shutdownStart = performance.now();
   
   // Cancel all pending requests
   requestQueue.cancelAll('Server shutdown');
@@ -111,13 +117,16 @@ export async function shutdownServer(): Promise<void> {
     logger.error('Error cleaning up Chrome API resources', error);
   }
   
-  logger.info('Server shutdown complete');
+  const shutdownTime = performance.now() - shutdownStart;
+  logger.info(`Server shutdown complete (took ${shutdownTime.toFixed(0)}ms)`);
 }
 
 /**
  * Handle incoming HTTP requests
  */
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const requestStartTime = performance.now();
+  
   // Setup timeout for the request
   const timeoutId = setTimeout(() => {
     logger.warn('Request timeout exceeded');
@@ -146,6 +155,18 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   // Clear timeout when response ends
   res.on('finish', () => {
     clearTimeout(timeoutId);
+    
+    // Log request timing for performance monitoring
+    const requestTime = performance.now() - requestStartTime;
+    
+    if (res.statusCode >= 400) {
+      errorCount++;
+      logger.warn(`Request completed with error ${res.statusCode} in ${requestTime.toFixed(1)}ms`);
+    } else if (requestTime > config.slowRequestThreshold) {
+      logger.warn(`Slow request completed in ${requestTime.toFixed(1)}ms (threshold: ${config.slowRequestThreshold}ms)`);
+    } else {
+      logger.debug(`Request completed in ${requestTime.toFixed(1)}ms`);
+    }
   });
   
   // Set security headers
@@ -310,41 +331,36 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
  */
 function handleCors(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const origin = req.headers.origin;
-  const allowedOrigins = config.allowedOrigins;
   
-  // Handle CORS based on configuration
+  // In local environment, we can be more permissive with CORS
   if (origin) {
-    if (allowedOrigins.includes(origin)) {
-      // Origin is explicitly allowed
+    // For local development, the origin is allowed if allowedOrigins includes '*'
+    // or if origin is explicitly allowed
+    if (config.allowedOrigins.includes('*') || config.allowedOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
-      res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
-      return true;
-    } else if (allowedOrigins.includes('*')) {
-      // Wildcard is allowed (not recommended for production)
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
       res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
       return true;
     } else {
-      // Origin is not allowed
-      res.statusCode = 403; // Forbidden
-      res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({
-        jsonrpc: '2.0',
-        error: {
-          code: -32001,
-          message: 'Origin not allowed'
-        },
-        id: null
-      }));
-      return false;
+      // Only block if we have explicitly restricted origins and this origin isn't allowed
+      if (config.allowedOrigins.length > 0) {
+        res.statusCode = 403; // Forbidden
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          error: {
+            code: -32001,
+            message: 'Origin not allowed'
+          },
+          id: null
+        }));
+        return false;
+      }
     }
   }
   
-  // No origin header (non-CORS request)
+  // In a local environment, we can be more lenient with no origin header
   return true;
 }
 
@@ -528,6 +544,15 @@ async function routeRequest(method: string, params: Record<string, unknown>): Pr
     case 'performSearch':
       return chromeAPI.performSearch(params.tabId as string, params.query as string);
       
+    // Server status and management methods
+    case 'getServerStatus':
+      return {
+        uptime: Date.now() - startTime,
+        requestCount,
+        errorCount,
+        pendingRequests: requestQueue.pendingCount()
+      };
+      
     // Method not found
     default:
       throw new Error(`Method not found: ${method}`);
@@ -583,4 +608,17 @@ function cleanupRateLimits(): void {
   if (count > 0) {
     logger.debug(`Cleaned up ${count} expired rate limits`);
   }
+}
+
+/**
+ * Get server metrics 
+ */
+export function getServerMetrics() {
+  return {
+    uptime: Date.now() - startTime,
+    requestCount,
+    errorCount,
+    pendingRequests: requestQueue ? requestQueue.pendingCount() : 0,
+    rateLimits: rateLimits.size
+  };
 }
