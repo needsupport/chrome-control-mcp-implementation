@@ -1,184 +1,252 @@
 /**
- * Type definitions for the Chrome Control MCP implementation
+ * Type definitions for the Chrome Control MCP
  */
 
-// Chrome API types
+// Tabs and Navigation
+
+/**
+ * Information about a browser tab
+ */
 export interface TabInfo {
   id: string;
   url: string;
   title: string;
+  status: 'loading' | 'complete' | 'error';
 }
 
-export interface ChromeSession {
-  targetId: string;
-  sessionId: string;
-}
+/**
+ * DOM Element Type
+ */
+export type ElementType =
+  | 'div'
+  | 'span'
+  | 'p'
+  | 'a'
+  | 'button'
+  | 'input'
+  | 'select'
+  | 'textarea'
+  | 'img'
+  | 'h1'
+  | 'h2'
+  | 'h3'
+  | 'h4'
+  | 'h5'
+  | 'h6'
+  | 'ul'
+  | 'ol'
+  | 'li'
+  | 'table'
+  | 'tr'
+  | 'td'
+  | 'th'
+  | 'form'
+  | 'label'
+  | 'iframe'
+  | 'section'
+  | 'article'
+  | 'header'
+  | 'footer'
+  | 'nav'
+  | 'main'
+  | 'aside'
+  | 'canvas'
+  | 'svg'
+  | 'unknown';
 
-// DOM interaction types
-export interface ElementInfo {
-  nodeId: number;
-  backendNodeId: number;
-  objectId?: string;
-  tagName: string;
-  attributes: Record<string, string>;
-  isVisible: boolean;
-  isClickable: boolean;
-  boundingBox?: BoundingBox;
-}
-
-export interface BoundingBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  top: number;
-  right: number;
-  bottom: number;
-  left: number;
-}
-
-// Semantic analysis types
+/**
+ * Semantic Element
+ */
 export interface SemanticElement {
   semanticId: string;
-  elementType: ElementType;
   nodeId: number;
-  backendNodeId: number;
-  objectId?: string;
-  text: string;
-  importance: number;
-  childIds: string[];
-  parentId?: string;
-  attributes: Record<string, string>;
+  elementType: ElementType;
+  textContent?: string;
+  attributes?: Record<string, string>;
+  boundingBox?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  visibility?: 'visible' | 'hidden' | 'partial';
+  importance?: number;
+  children?: SemanticElement[];
+  interactable?: boolean;
+  label?: string;
   role?: string;
-  boundingBox?: BoundingBox;
 }
 
-export enum ElementType {
-  NAVIGATION = 'navigation',
-  BUTTON = 'button',
-  LINK = 'link',
-  FORM = 'form',
-  INPUT = 'input',
-  CHECKBOX = 'checkbox',
-  RADIO = 'radio',
-  SELECT = 'select',
-  OPTION = 'option',
-  TEXT = 'text',
-  HEADING = 'heading',
-  IMAGE = 'image',
-  LIST = 'list',
-  LIST_ITEM = 'listItem',
-  TABLE = 'table',
-  OTHER = 'other'
+/**
+ * Content Type
+ */
+export type ContentType =
+  | 'article'
+  | 'product'
+  | 'navigation'
+  | 'form'
+  | 'search'
+  | 'advertisement'
+  | 'media'
+  | 'list'
+  | 'table'
+  | 'other';
+
+/**
+ * Metadata Fields
+ */
+export interface MetaData {
+  title?: string;
+  description?: string;
+  author?: string;
+  publishDate?: string;
+  keywords?: string[];
+  [key: string]: any;
 }
 
-// Content extraction types
+/**
+ * Article Content
+ */
+export interface ArticleContent {
+  title: string;
+  content: string;
+  summary?: string;
+  sections?: {
+    heading: string;
+    content: string;
+  }[];
+}
+
+/**
+ * Product Content
+ */
+export interface ProductContent {
+  name: string;
+  price?: string;
+  description?: string;
+  images?: string[];
+  attributes?: Record<string, string>;
+}
+
+/**
+ * Navigation Content
+ */
+export interface NavigationContent {
+  links: {
+    text: string;
+    url: string;
+    isActive?: boolean;
+  }[];
+}
+
+/**
+ * Form Content
+ */
+export interface FormContent {
+  id?: string;
+  action?: string;
+  method?: string;
+  fields: {
+    type: string;
+    name: string;
+    id?: string;
+    label?: string;
+    placeholder?: string;
+    required?: boolean;
+    options?: {
+      value: string;
+      text: string;
+    }[];
+  }[];
+}
+
+/**
+ * Page Content
+ */
 export interface PageContent {
   url: string;
   title: string;
-  mainContent: ContentBlock;
-  navigation?: NavigationInfo;
-  forms?: FormInfo[];
-  metaData: Record<string, string>;
+  mainContent: {
+    type: ContentType;
+    content: any;
+  }[];
+  metaData: MetaData;
+  semanticElements?: SemanticElement[];
 }
 
-export interface ContentBlock {
-  type: ContentType;
-  text: string;
-  importance: number;
-  semanticId?: string;
-  children: ContentBlock[];
-}
-
-export enum ContentType {
-  HEADING = 'heading',
-  PARAGRAPH = 'paragraph',
-  LIST = 'list',
-  LIST_ITEM = 'listItem',
-  TABLE = 'table',
-  IMAGE = 'image',
-  LINK = 'link',
-  CODE = 'code',
-  QUOTE = 'quote',
-  OTHER = 'other'
-}
-
-// Navigation types
-export interface NavigationInfo {
-  links: NavigationLink[];
-  menus: NavigationMenu[];
-  currentLocation: string;
-}
-
-export interface NavigationLink {
-  text: string;
-  url: string;
-  semanticId: string;
-  importance: number;
-}
-
-export interface NavigationMenu {
-  title: string;
-  links: NavigationLink[];
-  semanticId: string;
-}
-
-// Form interaction types
-export interface FormInfo {
-  semanticId: string;
-  name?: string;
-  action?: string;
-  method?: string;
-  fields: FormField[];
-  submitButton?: SemanticElement;
-}
-
-export interface FormField {
-  semanticId: string;
-  name?: string;
-  label?: string;
-  type: string;
-  value?: string;
-  required: boolean;
-  options?: string[];
-}
-
-// Error handling types
+/**
+ * Error Information
+ */
 export interface ErrorInfo {
   code: string;
   message: string;
-  details?: unknown;
-  recoverable: boolean;
-  recoveryStrategies?: string[];
+  details?: any;
 }
 
-// Performance metrics
-export interface PerformanceMetrics {
-  operation: string;
-  startTime: number;
-  endTime: number;
-  duration: number;
-  success: boolean;
-  error?: ErrorInfo;
-}
+// JSON-RPC Protocol Definitions
 
-// JSON-RPC request/response types
+/**
+ * JSON-RPC Request
+ */
 export interface JsonRpcRequest {
   jsonrpc: string;
   method: string;
-  params: Record<string, unknown>;
+  params: any;
   id: number | string;
 }
 
+/**
+ * JSON-RPC Response
+ */
 export interface JsonRpcResponse {
   jsonrpc: string;
-  result?: unknown;
-  error?: JsonRpcError;
-  id: number | string;
+  result?: any;
+  error?: {
+    code: number;
+    message: string;
+    data?: any;
+  };
+  id: number | string | null;
 }
 
+/**
+ * JSON-RPC Error
+ */
 export interface JsonRpcError {
   code: number;
   message: string;
-  data?: unknown;
+  data?: any;
+}
+
+/**
+ * MCP Server Configuration
+ */
+export interface ServerConfig {
+  port: number;
+  host: string;
+  debugMode: boolean;
+  timeout: number;
+  maxConcurrentRequests: number;
+}
+
+/**
+ * Cache Options
+ */
+export interface CacheOptions {
+  tabId?: string;
+  ttl?: number;
+  tags?: string[];
+}
+
+/**
+ * DOM Mutation Event
+ */
+export interface DomMutationEvent {
+  tabId: string;
+  nodeId: number;
+  type: 'childList' | 'attributes' | 'characterData';
+  addedNodes?: number[];
+  removedNodes?: number[];
+  attributeName?: string;
+  attributeValue?: string;
 }
