@@ -45,6 +45,7 @@ export const config = {
   // Content analysis settings
   maxContentLength: getEnvVarNum('MAX_CONTENT_LENGTH', 1000000), // 1MB
   contentChunkSize: getEnvVarNum('CONTENT_CHUNK_SIZE', 100000), // 100KB
+  maxSemanticAnalysisDepth: getEnvVarNum('MAX_SEMANTIC_ANALYSIS_DEPTH', 50), // Max depth for recursive DOM analysis
   
   // Feature flags
   enableMutationObserver: getEnvVarBool('ENABLE_MUTATION_OBSERVER', true),
