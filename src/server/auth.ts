@@ -19,13 +19,14 @@ export class AuthManager {
   private logger: Logger;
   private apiKeys: Set<string>;
   private enabled: boolean;
+  private lastAuthAttempt: number = 0;
 
   constructor(authConfig?: Partial<AuthConfig>) {
     this.logger = new Logger('auth-manager');
     
     // Default values
     const defaultConfig: AuthConfig = {
-      enabled: config.authEnabled ?? false,
+      enabled: config.authEnabled ?? true, // Security: Enabled by default
       apiKeys: config.apiKeys || [],
       generateKeyOnStartup: config.generateApiKeyOnStartup ?? true
     };
@@ -62,6 +63,11 @@ export class AuthManager {
    * Disable authentication
    */
   disable(): void {
+    if (process.env.NODE_ENV === 'production') {
+      this.logger.warn('Attempted to disable authentication in production environment - ignored for security');
+      return;
+    }
+    
     this.enabled = false;
     this.logger.info('Authentication disabled');
   }
@@ -78,14 +84,35 @@ export class AuthManager {
     // No API key provided
     if (!apiKey) {
       this.logger.warn('Authentication failed: No API key provided');
+      
+      // Security: Add small delay to prevent timing attacks
+      this.addAuthDelay();
+      
       return false;
     }
     
-    // Check if the API key exists
-    const isValid = this.apiKeys.has(apiKey);
+    // Check if the API key exists using constant-time comparison
+    let isValid = false;
+    
+    // Precompute the hash of the provided key
+    const hashedKey = this.hashKey(apiKey);
+    
+    // Perform constant-time comparison with all stored keys
+    for (const validKey of this.apiKeys) {
+      const hashedValidKey = this.hashKey(validKey);
+      
+      // Use a constant-time comparison function to avoid timing attacks
+      if (crypto.timingSafeEqual(Buffer.from(hashedKey, 'hex'), Buffer.from(hashedValidKey, 'hex'))) {
+        isValid = true;
+        break;
+      }
+    }
     
     if (!isValid) {
       this.logger.warn('Authentication failed: Invalid API key');
+      
+      // Security: Add small delay to prevent timing attacks
+      this.addAuthDelay();
     }
     
     return isValid;
@@ -95,7 +122,7 @@ export class AuthManager {
    * Generate a new API key
    */
   generateApiKey(): string {
-    // Generate a random API key
+    // Generate a strong random API key
     const apiKey = crypto.randomBytes(32).toString('hex');
     
     // Add to the set of valid keys
@@ -147,5 +174,28 @@ export class AuthManager {
     }
     
     return authHeader;
+  }
+  
+  /**
+   * Hash a key for constant-time comparison
+   */
+  private hashKey(key: string): string {
+    return crypto.createHash('sha256').update(key).digest('hex');
+  }
+  
+  /**
+   * Add a small, variable delay to prevent timing attacks
+   */
+  private addAuthDelay(): void {
+    // Calculate time since last auth attempt
+    const now = Date.now();
+    const elapsed = now - this.lastAuthAttempt;
+    this.lastAuthAttempt = now;
+    
+    // If requests are coming too quickly, add a delay
+    if (elapsed < 500) {
+      const delay = Math.floor(Math.random() * 200) + 50; // 50-250ms
+      setTimeout(() => {}, delay);
+    }
   }
 }

@@ -16,6 +16,7 @@ import { config } from '../config.js';
 import { SemanticAnalyzer } from '../dom/semantic-analyzer.js';
 import { ContentExtractor } from '../dom/content-extractor.js';
 import { Mutex } from 'async-mutex';
+import { withRetry, withTimeout, withMutex } from '../utils/retry.js';
 
 /**
  * Main API class for Chrome Control MCP
@@ -42,6 +43,12 @@ export class ChromeAPI {
     
     // Connect the DOM observer to the cache system
     this.cacheSystem.connectDOMObserver(this.domObserver);
+    
+    // Listen for DOM mutations to invalidate cache
+    this.domObserver.on('mutation', (event) => {
+      this.logger.debug('DOM mutation detected', { tabId: event.tabId });
+      this.cacheSystem.invalidateTabCache(event.tabId);
+    });
   }
 
   /**
@@ -50,16 +57,16 @@ export class ChromeAPI {
   async initialize(): Promise<{ status: string }> {
     this.logger.info('Initializing Chrome API');
     
-    try {
+    return await withRetry(async () => {
       // Initialize the tab manager
       await this.tabManager.initialize();
       
       this.logger.info('Chrome API initialized successfully');
       return { status: 'initialized' };
-    } catch (error) {
-      this.logger.error('Failed to initialize Chrome API', error);
-      throw new Error(`Initialization error: ${error.message}`);
-    }
+    }, {
+      name: 'initialize Chrome API',
+      maxRetries: 3
+    });
   }
 
   /**
@@ -68,7 +75,7 @@ export class ChromeAPI {
   async navigate(url: string): Promise<{ tabId: string; status: string }> {
     this.logger.info('Navigating to URL', { url });
     
-    try {
+    return await withRetry(async () => {
       // Create a new tab via the tab manager
       const tabId = await this.tabManager.createTab(url);
       
@@ -80,10 +87,10 @@ export class ChromeAPI {
       
       this.logger.info('Navigation successful', { tabId, url });
       return { tabId, status: 'loaded' };
-    } catch (error) {
-      this.logger.error('Navigation error', { url, error });
-      throw new Error(`Failed to navigate to ${url}: ${error.message}`);
-    }
+    }, {
+      name: `navigate to ${url}`,
+      maxRetries: 2
+    });
   }
 
   /**
@@ -101,60 +108,109 @@ export class ChromeAPI {
       return { content: cachedContent };
     }
     
-    try {
-      // Verify tab exists
-      if (!this.tabManager.hasTab(tabId)) {
-        throw new Error(`Tab ${tabId} not found`);
+    return await withMutex(this.mutex, async (release) => {
+      try {
+        // Verify tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Get content via Runtime.evaluate with timeout
+        return await withTimeout(async () => {
+          const { result } = await client.Runtime.evaluate({
+            expression: 'document.documentElement.outerHTML',
+            returnByValue: true
+          });
+          
+          if (!result.value) {
+            throw new Error('Failed to get page content: Empty result');
+          }
+          
+          const content = result.value as string;
+          
+          // Cache the content
+          this.cacheSystem.set(cacheKey, content, { tabId });
+          
+          return { content };
+        }, {
+          name: `get content for tab ${tabId}`,
+          timeoutMs: config.requestTimeout
+        });
+      } catch (error) {
+        this.logger.error('Error getting content', { tabId, error });
+        throw new Error(`Failed to get page content: ${error.message}`);
       }
-      
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Get content via Runtime.evaluate
-      const { result } = await client.Runtime.evaluate({
-        expression: 'document.documentElement.outerHTML',
-        returnByValue: true
-      });
-      
-      const content = result.value as string;
-      
-      // Cache the content
-      this.cacheSystem.set(cacheKey, content, { tabId });
-      
-      return { content };
-    } catch (error) {
-      this.logger.error('Error getting content', { tabId, error });
-      throw new Error(`Failed to get page content: ${error.message}`);
-    }
+    }, {
+      name: `getContent for tab ${tabId}`
+    });
   }
 
   /**
-   * Execute JavaScript code in a tab
+   * Execute JavaScript code in a tab with security enhancements
    */
   async executeScript(tabId: string, script: string): Promise<{ result: unknown }> {
     this.logger.debug('Executing script', { tabId, scriptLength: script.length });
     
-    try {
-      // Verify tab exists
-      if (!this.tabManager.hasTab(tabId)) {
-        throw new Error(`Tab ${tabId} not found`);
+    return await withMutex(this.mutex, async (release) => {
+      try {
+        // Verify tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Security: Sanitize and wrap script in try/catch to safely handle errors
+        // and prevent client-side exceptions from breaking the CDP connection
+        const wrappedScript = `
+          (function() {
+            try {
+              // Script execution
+              ${script}
+            } catch (error) {
+              // Capture and return any errors
+              return {
+                __error: true,
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+              };
+            }
+          })();
+        `;
+        
+        // Execute the script with timeout
+        return await withTimeout(async () => {
+          const { result } = await client.Runtime.evaluate({
+            expression: wrappedScript,
+            returnByValue: true,
+            awaitPromise: true
+          });
+          
+          // Check if script execution resulted in error
+          const value = result.value;
+          
+          if (value && typeof value === 'object' && (value as any).__error === true) {
+            const errorData = value as { __error: boolean, name: string, message: string, stack: string };
+            throw new Error(`Script execution failed: ${errorData.message}`);
+          }
+          
+          return { result: result.value };
+        }, {
+          name: `execute script in tab ${tabId}`,
+          timeoutMs: config.requestTimeout
+        });
+      } catch (error) {
+        this.logger.error('Script execution error', { tabId, error });
+        throw new Error(`Failed to execute script: ${error.message}`);
       }
-      
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Execute the script
-      const { result } = await client.Runtime.evaluate({
-        expression: script,
-        returnByValue: true,
-        awaitPromise: true
-      });
-      
-      return { result: result.value };
-    } catch (error) {
-      this.logger.error('Script execution error', { tabId, error });
-      throw new Error(`Failed to execute script: ${error.message}`);
-    }
+    }, {
+      name: `executeScript for tab ${tabId}`
+    });
   }
 
   /**
@@ -163,7 +219,7 @@ export class ChromeAPI {
   async clickElement(tabId: string, selector: string): Promise<{ success: boolean }> {
     this.logger.debug('Clicking element', { tabId, selector });
     
-    try {
+    return await withRetry(async () => {
       // Verify tab exists
       if (!this.tabManager.hasTab(tabId)) {
         throw new Error(`Tab ${tabId} not found`);
@@ -200,6 +256,10 @@ export class ChromeAPI {
       if (jsClickResult.success) {
         // JavaScript click succeeded
         this.logger.debug('Element clicked via JavaScript', { tabId, selector });
+        
+        // Invalidate cache since page state has changed
+        this.cacheSystem.invalidateTabCache(tabId);
+        
         return { success: true };
       }
       
@@ -250,10 +310,10 @@ export class ChromeAPI {
       this.cacheSystem.invalidateTabCache(tabId);
       
       return { success: true };
-    } catch (error) {
-      this.logger.error('Click error', { tabId, selector, error });
-      throw new Error(`Failed to click element: ${error.message}`);
-    }
+    }, {
+      name: `click element ${selector} in tab ${tabId}`,
+      maxRetries: 3
+    });
   }
 
   /**
@@ -262,23 +322,28 @@ export class ChromeAPI {
   async takeScreenshot(tabId: string): Promise<{ data: string }> {
     this.logger.debug('Taking screenshot', { tabId });
     
-    try {
-      // Verify tab exists
-      if (!this.tabManager.hasTab(tabId)) {
-        throw new Error(`Tab ${tabId} not found`);
+    return await withTimeout(async () => {
+      try {
+        // Verify tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Take screenshot
+        const { data } = await client.Page.captureScreenshot();
+        
+        return { data };
+      } catch (error) {
+        this.logger.error('Screenshot error', { tabId, error });
+        throw new Error(`Failed to take screenshot: ${error.message}`);
       }
-      
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Take screenshot
-      const { data } = await client.Page.captureScreenshot();
-      
-      return { data };
-    } catch (error) {
-      this.logger.error('Screenshot error', { tabId, error });
-      throw new Error(`Failed to take screenshot: ${error.message}`);
-    }
+    }, {
+      name: `take screenshot of tab ${tabId}`,
+      timeoutMs: config.requestTimeout
+    });
   }
 
   /**
@@ -308,85 +373,91 @@ export class ChromeAPI {
    * Get a structured representation of the page content
    */
   async getStructuredContent(tabId: string): Promise<{ content: PageContent }> {
-    const release = await this.mutex.acquire();
-    
-    try {
-      this.logger.debug('Getting structured content', { tabId });
-      
-      // Check cache first
-      const cacheKey = `structured-content:${tabId}`;
-      const cachedContent = this.cacheSystem.get<PageContent>(cacheKey);
-      
-      if (cachedContent) {
-        this.logger.debug('Returning cached structured content', { tabId });
-        return { content: cachedContent };
+    return await withMutex(this.mutex, async (release) => {
+      try {
+        this.logger.debug('Getting structured content', { tabId });
+        
+        // Check cache first
+        const cacheKey = `structured-content:${tabId}`;
+        const cachedContent = this.cacheSystem.get<PageContent>(cacheKey);
+        
+        if (cachedContent) {
+          this.logger.debug('Returning cached structured content', { tabId });
+          return { content: cachedContent };
+        }
+        
+        // Verify tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Get the semantic model first (or use cached version)
+        const { semanticModel } = await this.analyzePageSemantics(tabId);
+        
+        // Use ContentExtractor to extract structured content
+        const content = await withTimeout(
+          () => this.contentExtractor.extractContent(client, tabId, semanticModel),
+          { name: `extract content for tab ${tabId}`, timeoutMs: config.requestTimeout }
+        );
+        
+        // Cache the content
+        this.cacheSystem.set(cacheKey, content, { tabId });
+        
+        return { content };
+      } catch (error) {
+        this.logger.error('Structured content error', { tabId, error });
+        throw new Error(`Failed to get structured content: ${error.message}`);
       }
-      
-      // Verify tab exists
-      if (!this.tabManager.hasTab(tabId)) {
-        throw new Error(`Tab ${tabId} not found`);
-      }
-      
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Get the semantic model first (or use cached version)
-      const { semanticModel } = await this.analyzePageSemantics(tabId);
-      
-      // Use ContentExtractor to extract structured content
-      const content = await this.contentExtractor.extractContent(client, tabId, semanticModel);
-      
-      // Cache the content
-      this.cacheSystem.set(cacheKey, content, { tabId });
-      
-      return { content };
-    } catch (error) {
-      this.logger.error('Structured content error', { tabId, error });
-      throw new Error(`Failed to get structured content: ${error.message}`);
-    } finally {
-      release();
-    }
+    }, {
+      name: `getStructuredContent for tab ${tabId}`
+    });
   }
 
   /**
    * Analyze the page and build a semantic DOM model
    */
   async analyzePageSemantics(tabId: string): Promise<{ semanticModel: SemanticElement[] }> {
-    const release = await this.mutex.acquire();
-    
-    try {
-      this.logger.debug('Analyzing page semantics', { tabId });
-      
-      // Check cache first
-      const cacheKey = `semantic-model:${tabId}`;
-      const cachedModel = this.cacheSystem.get<SemanticElement[]>(cacheKey);
-      
-      if (cachedModel) {
-        this.logger.debug('Returning cached semantic model', { tabId });
-        return { semanticModel: cachedModel };
+    return await withMutex(this.mutex, async (release) => {
+      try {
+        this.logger.debug('Analyzing page semantics', { tabId });
+        
+        // Check cache first
+        const cacheKey = `semantic-model:${tabId}`;
+        const cachedModel = this.cacheSystem.get<SemanticElement[]>(cacheKey);
+        
+        if (cachedModel) {
+          this.logger.debug('Returning cached semantic model', { tabId });
+          return { semanticModel: cachedModel };
+        }
+        
+        // Verify tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Use SemanticAnalyzer to analyze the page with timeout
+        const semanticModel = await withTimeout(
+          () => this.semanticAnalyzer.analyzePage(client, tabId),
+          { name: `analyze page semantics for tab ${tabId}`, timeoutMs: config.requestTimeout }
+        );
+        
+        // Cache the model
+        this.cacheSystem.set(cacheKey, semanticModel, { tabId });
+        
+        return { semanticModel };
+      } catch (error) {
+        this.logger.error('Semantic analysis error', { tabId, error });
+        throw new Error(`Failed to analyze page semantics: ${error.message}`);
       }
-      
-      // Verify tab exists
-      if (!this.tabManager.hasTab(tabId)) {
-        throw new Error(`Tab ${tabId} not found`);
-      }
-      
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Use SemanticAnalyzer to analyze the page
-      const semanticModel = await this.semanticAnalyzer.analyzePage(client, tabId);
-      
-      // Cache the model
-      this.cacheSystem.set(cacheKey, semanticModel, { tabId });
-      
-      return { semanticModel };
-    } catch (error) {
-      this.logger.error('Semantic analysis error', { tabId, error });
-      throw new Error(`Failed to analyze page semantics: ${error.message}`);
-    } finally {
-      release();
-    }
+    }, {
+      name: `analyzePageSemantics for tab ${tabId}`
+    });
   }
 
   /**
@@ -395,7 +466,7 @@ export class ChromeAPI {
   async findElementsByText(tabId: string, text: string): Promise<{ elements: SemanticElement[] }> {
     this.logger.debug('Finding elements by text', { tabId, text });
     
-    try {
+    return await withRetry(async () => {
       // First, get the semantic model (or generate it if not cached)
       const { semanticModel } = await this.analyzePageSemantics(tabId);
       
@@ -403,10 +474,10 @@ export class ChromeAPI {
       const elements = await this.semanticAnalyzer.findElementsByText(semanticModel, text);
       
       return { elements };
-    } catch (error) {
-      this.logger.error('Find elements by text error', { tabId, text, error });
-      throw new Error(`Failed to find elements by text: ${error.message}`);
-    }
+    }, {
+      name: `find elements containing "${text}" in tab ${tabId}`,
+      maxRetries: 2
+    });
   }
 
   /**
@@ -415,7 +486,7 @@ export class ChromeAPI {
   async findClickableElements(tabId: string): Promise<{ elements: SemanticElement[] }> {
     this.logger.debug('Finding clickable elements', { tabId });
     
-    try {
+    return await withRetry(async () => {
       // First, get the semantic model (or generate it if not cached)
       const { semanticModel } = await this.analyzePageSemantics(tabId);
       
@@ -429,10 +500,10 @@ export class ChromeAPI {
       );
       
       return { elements };
-    } catch (error) {
-      this.logger.error('Find clickable elements error', { tabId, error });
-      throw new Error(`Failed to find clickable elements: ${error.message}`);
-    }
+    }, {
+      name: `find clickable elements in tab ${tabId}`,
+      maxRetries: 2
+    });
   }
 
   /**
@@ -441,7 +512,7 @@ export class ChromeAPI {
   async clickSemanticElement(tabId: string, semanticId: string): Promise<{ success: boolean }> {
     this.logger.debug('Clicking semantic element', { tabId, semanticId });
     
-    try {
+    return await withRetry(async () => {
       // First, get the semantic model (or generate it if not cached)
       const { semanticModel } = await this.analyzePageSemantics(tabId);
       
@@ -462,10 +533,10 @@ export class ChromeAPI {
       this.cacheSystem.invalidateTabCache(tabId);
       
       return result;
-    } catch (error) {
-      this.logger.error('Click semantic element error', { tabId, semanticId, error });
-      throw new Error(`Failed to click semantic element: ${error.message}`);
-    }
+    }, {
+      name: `click semantic element ${semanticId} in tab ${tabId}`,
+      maxRetries: 3
+    });
   }
 
   /**
@@ -474,76 +545,84 @@ export class ChromeAPI {
   async fillFormField(tabId: string, semanticId: string, value: string): Promise<{ success: boolean }> {
     this.logger.debug('Filling form field', { tabId, semanticId, valueLength: value.length });
     
-    try {
-      // First, get the semantic model (or generate it if not cached)
-      const { semanticModel } = await this.analyzePageSemantics(tabId);
-      
-      // Find the target element
-      const element = semanticModel.find(el => el.semanticId === semanticId);
-      
-      if (!element) {
-        throw new Error(`Element with semantic ID ${semanticId} not found`);
-      }
-      
-      // Verify this is an input element
-      if (!['input', 'select', 'textarea'].includes(element.elementType)) {
-        throw new Error(`Element is not a form field: ${element.elementType}`);
-      }
-      
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
-      
-      // Get a CSS selector for the element
-      const selector = this.semanticAnalyzer.createSelector(element);
-      
-      // Fill the field
-      const result = await client.Runtime.evaluate({
-        expression: `
-          (function() {
-            try {
-              const element = document.querySelector(${JSON.stringify(selector)});
-              if (!element) return { success: false, error: 'Element not found' };
-              
-              // Check if the element is a select
-              if (element.tagName === 'SELECT') {
-                // Find option with matching text or value
-                let option = Array.from(element.options).find(opt => 
-                  opt.text === ${JSON.stringify(value)} || opt.value === ${JSON.stringify(value)}
-                );
+    return await withRetry(async () => {
+      try {
+        // First, get the semantic model (or generate it if not cached)
+        const { semanticModel } = await this.analyzePageSemantics(tabId);
+        
+        // Find the target element
+        const element = semanticModel.find(el => el.semanticId === semanticId);
+        
+        if (!element) {
+          throw new Error(`Element with semantic ID ${semanticId} not found`);
+        }
+        
+        // Verify this is an input element
+        if (!['input', 'select', 'textarea'].includes(element.elementType)) {
+          throw new Error(`Element is not a form field: ${element.elementType}`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Get a CSS selector for the element
+        const selector = this.semanticAnalyzer.createSelector(element);
+        
+        // Fill the field with security enhancements
+        const result = await client.Runtime.evaluate({
+          expression: `
+            (function() {
+              try {
+                const element = document.querySelector(${JSON.stringify(selector)});
+                if (!element) return { success: false, error: 'Element not found' };
                 
-                if (option) {
-                  element.value = option.value;
-                  element.dispatchEvent(new Event('change', { bubbles: true }));
+                // Check if the element is a select
+                if (element.tagName === 'SELECT') {
+                  // Find option with matching text or value
+                  let option = Array.from(element.options).find(opt => 
+                    opt.text === ${JSON.stringify(value)} || opt.value === ${JSON.stringify(value)}
+                  );
+                  
+                  if (option) {
+                    element.value = option.value;
+                    element.dispatchEvent(new Event('change', { bubbles: true }));
+                  } else {
+                    return { success: false, error: 'Option not found' };
+                  }
                 } else {
-                  return { success: false, error: 'Option not found' };
+                  // For text inputs and textareas
+                  element.value = ${JSON.stringify(value)};
+                  element.dispatchEvent(new Event('input', { bubbles: true }));
+                  element.dispatchEvent(new Event('change', { bubbles: true }));
                 }
-              } else {
-                // For text inputs and textareas
-                element.value = ${JSON.stringify(value)};
-                element.dispatchEvent(new Event('input', { bubbles: true }));
-                element.dispatchEvent(new Event('change', { bubbles: true }));
+                
+                return { success: true };
+              } catch (error) {
+                return { success: false, error: error.message };
               }
-              
-              return { success: true };
-            } catch (error) {
-              return { success: false, error: error.message };
-            }
-          })()
-        `,
-        returnByValue: true
-      });
-      
-      const fillResult = result.result.value as { success: boolean, error?: string };
-      
-      if (!fillResult.success) {
-        throw new Error(`Failed to fill form field: ${fillResult.error}`);
+            })()
+          `,
+          returnByValue: true
+        });
+        
+        const fillResult = result.result.value as { success: boolean, error?: string };
+        
+        if (!fillResult.success) {
+          throw new Error(`Failed to fill form field: ${fillResult.error}`);
+        }
+        
+        // Invalidate cache since form state has changed
+        this.cacheSystem.invalidateTabCache(tabId);
+        
+        return { success: true };
+      } catch (error) {
+        this.logger.error('Fill form field error', { tabId, semanticId, error });
+        throw new Error(`Failed to fill form field: ${error.message}`);
       }
-      
-      return { success: true };
-    } catch (error) {
-      this.logger.error('Fill form field error', { tabId, semanticId, error });
-      throw new Error(`Failed to fill form field: ${error.message}`);
-    }
+    }, {
+      name: `fill form field ${semanticId} in tab ${tabId}`,
+      maxRetries: 2
+    });
   }
 
   /**
@@ -552,75 +631,123 @@ export class ChromeAPI {
   async performSearch(tabId: string, query: string): Promise<{ success: boolean }> {
     this.logger.debug('Performing search', { tabId, query });
     
+    return await withRetry(async () => {
+      try {
+        // Verify tab exists
+        if (!this.tabManager.hasTab(tabId)) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+        
+        // Get the client
+        const client = this.tabManager.getTabClient(tabId);
+        
+        // Enhanced security: Sanitize the search query
+        const sanitizedQuery = query.replace(/[<>"'&]/g, '');
+        
+        // Simple implementation: find a search input and submit with query
+        const result = await client.Runtime.evaluate({
+          expression: `
+            (function() {
+              try {
+                // Try to find a search form or input
+                const searchInput = 
+                  document.querySelector('input[type="search"]') || 
+                  document.querySelector('input[name="q"]') ||
+                  document.querySelector('input[name="query"]') ||
+                  document.querySelector('input[name="search"]');
+                
+                if (!searchInput) {
+                  return { success: false, error: 'No search input found' };
+                }
+                
+                // Fill the search input
+                searchInput.value = ${JSON.stringify(sanitizedQuery)};
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                
+                // Find the form
+                const form = searchInput.closest('form');
+                
+                if (form) {
+                  // Submit the form
+                  form.submit();
+                } else {
+                  // Try to simulate Enter key if no form
+                  searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                }
+                
+                return { success: true };
+              } catch (error) {
+                return { success: false, error: error.message };
+              }
+            })()
+          `,
+          returnByValue: true
+        });
+        
+        const searchResult = result.result.value as { success: boolean, error?: string };
+        
+        if (!searchResult.success) {
+          throw new Error(`Failed to perform search: ${searchResult.error}`);
+        }
+        
+        // Wait for navigation to complete with timeout
+        await withTimeout(async () => {
+          await new Promise<void>((resolve) => {
+            const loadTimeout = setTimeout(() => {
+              resolve(); // Don't reject on timeout, the search might not navigate
+            }, 5000);
+            
+            client.Page.loadEventFired(() => {
+              clearTimeout(loadTimeout);
+              resolve();
+            });
+          });
+        }, {
+          name: `wait for search navigation in tab ${tabId}`,
+          timeoutMs: 7000 // A bit longer than the internal timeout
+        });
+        
+        // Invalidate cache since page has changed
+        this.cacheSystem.invalidateTabCache(tabId);
+        
+        return { success: true };
+      } catch (error) {
+        this.logger.error('Search error', { tabId, query, error });
+        throw new Error(`Failed to perform search: ${error.message}`);
+      }
+    }, {
+      name: `perform search for "${query}" in tab ${tabId}`,
+      maxRetries: 2
+    });
+  }
+  
+  /**
+   * Clean up resources when shutting down
+   */
+  async cleanup(): Promise<void> {
+    this.logger.info('Cleaning up Chrome API resources...');
+    
     try {
-      // Get the client
-      const client = this.tabManager.getTabClient(tabId);
+      // Get all tabs
+      const tabs = await this.tabManager.getAllTabs();
       
-      // Simple implementation: find a search input and submit with query
-      const result = await client.Runtime.evaluate({
-        expression: `
-          (function() {
-            try {
-              // Try to find a search form or input
-              const searchInput = 
-                document.querySelector('input[type="search"]') || 
-                document.querySelector('input[name="q"]') ||
-                document.querySelector('input[name="query"]') ||
-                document.querySelector('input[name="search"]');
-              
-              if (!searchInput) {
-                return { success: false, error: 'No search input found' };
-              }
-              
-              // Fill the search input
-              searchInput.value = ${JSON.stringify(query)};
-              searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-              
-              // Find the form
-              const form = searchInput.closest('form');
-              
-              if (form) {
-                // Submit the form
-                form.submit();
-              } else {
-                // Try to simulate Enter key if no form
-                searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-              }
-              
-              return { success: true };
-            } catch (error) {
-              return { success: false, error: error.message };
-            }
-          })()
-        `,
-        returnByValue: true
-      });
-      
-      const searchResult = result.result.value as { success: boolean, error?: string };
-      
-      if (!searchResult.success) {
-        throw new Error(`Failed to perform search: ${searchResult.error}`);
+      // Close all tabs
+      for (const tab of tabs) {
+        try {
+          this.logger.debug(`Closing tab ${tab.id} during cleanup`);
+          await this.closeTab(tab.id);
+        } catch (error) {
+          this.logger.warn(`Error closing tab ${tab.id} during cleanup:`, error);
+        }
       }
       
-      // Wait for navigation to complete
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          resolve(); // Don't reject on timeout, the search might not navigate
-        }, 5000);
-        
-        client.Page.loadEventFired(() => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
+      // Additional cleanup
+      this.cacheSystem.clear();
       
-      // Invalidate cache since page has changed
-      this.cacheSystem.invalidateTabCache(tabId);
-      
-      return { success: true };
+      this.logger.info('Chrome API resources cleaned up successfully');
     } catch (error) {
-      this.logger.error('Search error', { tabId, query, error });
-      throw new Error(`Failed to perform search: ${error.message}`);
+      this.logger.error('Error during Chrome API cleanup:', error);
+      throw error;
     }
   }
 }

@@ -41,6 +41,7 @@ export const config = {
   // DOM interaction configuration
   domPollingInterval: getEnvVarNum('DOM_POLLING_INTERVAL', 100), // milliseconds
   maxRetries: getEnvVarNum('MAX_RETRIES', 3),
+  mutexTimeout: getEnvVarNum('MUTEX_TIMEOUT', 10000), // 10 seconds timeout for mutex acquisition
   
   // Content analysis settings
   maxContentLength: getEnvVarNum('MAX_CONTENT_LENGTH', 1000000), // 1MB
@@ -56,18 +57,19 @@ export const config = {
   enableContentEmbeddings: getEnvVarBool('ENABLE_CONTENT_EMBEDDINGS', false), // Disabled by default
   
   // Authentication configuration
-  authEnabled: getEnvVarBool('AUTH_ENABLED', false),
+  authEnabled: getEnvVarBool('AUTH_ENABLED', true), // SECURITY: Enabled by default
   apiKeys: getEnvVarArray('API_KEYS'),
   generateApiKeyOnStartup: getEnvVarBool('GENERATE_API_KEY_ON_STARTUP', true),
   
   // Rate limiting configuration
-  rateLimitEnabled: getEnvVarBool('RATE_LIMIT_ENABLED', false),
+  rateLimitEnabled: getEnvVarBool('RATE_LIMIT_ENABLED', true), // SECURITY: Enabled by default
   rateLimitRequests: getEnvVarNum('RATE_LIMIT_REQUESTS', 100), // requests per window
   rateLimitWindow: getEnvVarNum('RATE_LIMIT_WINDOW', 60000), // 1 minute window
   
   // Request validation
   maxRequestSize: getEnvVarNum('MAX_REQUEST_SIZE', 1048576), // 1MB
   requestTimeout: getEnvVarNum('REQUEST_TIMEOUT', 60000), // 60 seconds
+  maxConcurrentRequests: getEnvVarNum('MAX_CONCURRENT_REQUESTS', 10), // Maximum concurrent requests
   
   // Proxy configuration (for accessing sites through a proxy)
   proxyEnabled: getEnvVarBool('PROXY_ENABLED', false),
@@ -75,11 +77,16 @@ export const config = {
   
   // Security settings
   sandboxJavaScript: getEnvVarBool('SANDBOX_JAVASCRIPT', true),
-  allowedOrigins: getEnvVarArray('ALLOWED_ORIGINS', ['*']),
+  allowedOrigins: getEnvVarArray('ALLOWED_ORIGINS', []), // SECURITY: Empty by default, requiring explicit configuration
+  enableCSP: getEnvVarBool('ENABLE_CSP', true), // SECURITY: Content Security Policy enabled by default
   
   // Monitoring and debugging
   healthcheckEnabled: getEnvVarBool('HEALTHCHECK_ENABLED', true),
   healthcheckPath: getEnvVar('HEALTHCHECK_PATH', '/health'),
   metricsEnabled: getEnvVarBool('METRICS_ENABLED', false),
-  metricsPath: getEnvVar('METRICS_PATH', '/metrics')
+  metricsPath: getEnvVar('METRICS_PATH', '/metrics'),
+  
+  // Concurrency and resource management
+  gracefulShutdownTimeout: getEnvVarNum('GRACEFUL_SHUTDOWN_TIMEOUT', 10000), // 10 seconds
+  tabCleanupInterval: getEnvVarNum('TAB_CLEANUP_INTERVAL', 60000), // 1 minute
 };
