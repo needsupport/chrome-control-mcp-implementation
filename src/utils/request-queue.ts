@@ -208,4 +208,11 @@ export class RequestQueue extends EventEmitter {
   public get active(): number {
     return this.activeCount;
   }
+
+  /**
+   * Get the total number of pending requests (queued + active)
+   */
+  public pendingCount(): number {
+    return this.queue.length + this.activeCount;
+  }
 }
