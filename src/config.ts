@@ -51,6 +51,7 @@ export const config = {
   chromeMaxCpuUsage: getEnvVarNum('CHROME_MAX_CPU_USAGE', 80), // 80% CPU usage threshold
   chromeMaxMemoryUsage: getEnvVarNum('CHROME_MAX_MEMORY_USAGE', 2000), // 2GB memory usage threshold
   autoFreeDebugPort: getEnvVarBool('AUTO_FREE_DEBUG_PORT', false),
+  maxChromeInstances: getEnvVarNum('MAX_CHROME_INSTANCES', 5), // Maximum number of Chrome instances
   
   // Chrome connection configuration
   chromeDebuggingPort: getEnvVarNum('CHROME_DEBUGGING_PORT', 9222),
