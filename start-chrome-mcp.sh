@@ -1,140 +1,175 @@
 #!/bin/bash
 
-# Chrome Control MCP Server - Startup Script
-# Handles the setup, build and startup of the MCP server
+# Start Chrome Control MCP Server
+# Enhanced script that leverages the improved Chrome Process Manager
 
-set -e  # Exit on error
-
-# Set execute permissions for this script if not already set
+# Set execute permissions for this script
 chmod +x "$0"
 
-# Configuration (can be overridden with environment variables)
-SERVER_PORT=${PORT:-3001}
-CHROME_DEBUG_PORT=${CHROME_DEBUGGING_PORT:-9222}
-NODE_ENV=${NODE_ENV:-development}
-LOG_LEVEL=${LOG_LEVEL:-info}
-MANAGE_CHROME=${MANAGE_CHROME_PROCESS:-true}
-HEALTH_CHECK_PATH=${HEALTHCHECK_PATH:-/health}
-BUILD_FIRST=${BUILD_FIRST:-true}
+# Configuration with defaults (can be overridden with environment variables)
+export PORT=${PORT:-3001}
+export CHROME_DEBUGGING_PORT=${CHROME_DEBUGGING_PORT:-9222}
+export NODE_ENV=${NODE_ENV:-development}
+export LOG_LEVEL=${LOG_LEVEL:-info}
+export MANAGE_CHROME_PROCESS=${MANAGE_CHROME_PROCESS:-true}
+export CHROME_TEMP_USER_DATA_DIR=${CHROME_TEMP_USER_DATA_DIR:-true}
 
-# Log functions with timestamps
-log_info() { echo -e "\e[34m[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]\e[0m $1"; }
-log_success() { echo -e "\e[32m[$(date '+%Y-%m-%d %H:%M:%S')] [SUCCESS]\e[0m $1"; }
-log_warning() { echo -e "\e[33m[$(date '+%Y-%m-%d %H:%M:%S')] [WARNING]\e[0m $1"; }
-log_error() { echo -e "\e[31m[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR]\e[0m $1"; }
+# Log functions
+log_info() { echo -e "\e[34m[INFO]\e[0m $1"; }
+log_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; }
+log_warning() { echo -e "\e[33m[WARNING]\e[0m $1"; }
+log_error() { echo -e "\e[31m[ERROR]\e[0m $1"; }
 
-# Print banner
-echo -e "\e[36m"
-echo "╔═══════════════════════════════════════════════════════════════╗"
-echo "║                  Chrome Control MCP Server                     ║" 
-echo "║                                                               ║"
-echo "║  Efficient web browsing capabilities for AI assistants        ║"
-echo "║  without relying on screenshots                               ║"
-echo "╚═══════════════════════════════════════════════════════════════╝"
-echo -e "\e[0m"
+# Check node version
+node_version=$(node -v 2>/dev/null || echo "")
+if [[ -z "$node_version" ]]; then
+  log_error "Node.js is not installed or not in PATH"
+  log_info "Please install Node.js from https://nodejs.org/"
+  exit 1
+fi
 
-# Setup cleanup function to ensure proper shutdown
-cleanup() {
-  log_info "Shutting down gracefully..."
-  
-  # Check if a server PID file exists and kill the process
-  if [[ -f ".server.pid" ]]; then
-    SERVER_PID=$(cat .server.pid)
-    if ps -p "$SERVER_PID" > /dev/null; then
-      log_info "Stopping server process (PID: $SERVER_PID)"
-      kill "$SERVER_PID" 2>/dev/null || true
+log_info "Node.js version: $node_version"
+
+# Detect platform
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  PLATFORM="macOS"
+  # Try to find Chrome on macOS
+  if [[ -z "$CHROME_EXECUTABLE" ]]; then
+    if [[ -f "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+      export CHROME_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    elif [[ -f "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+      export CHROME_EXECUTABLE="$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     fi
-    rm -f .server.pid
+  fi
+elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+  PLATFORM="Windows"
+  # Try to find Chrome on Windows
+  if [[ -z "$CHROME_EXECUTABLE" ]]; then
+    if [[ -f "C:\Program Files\Google\Chrome\Application\chrome.exe" ]]; then
+      export CHROME_EXECUTABLE="C:\Program Files\Google\Chrome\Application\chrome.exe"
+    elif [[ -f "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" ]]; then
+      export CHROME_EXECUTABLE="C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+    fi
+  fi
+else
+  PLATFORM="Linux"
+  # Try to find Chrome on Linux
+  if [[ -z "$CHROME_EXECUTABLE" ]]; then
+    for chrome_path in "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable" "/usr/bin/chromium" "/usr/bin/chromium-browser"; do
+      if [[ -f "$chrome_path" ]]; then
+        export CHROME_EXECUTABLE="$chrome_path"
+        break
+      fi
+    done
+  fi
+fi
+
+if [[ -z "$CHROME_EXECUTABLE" ]]; then
+  log_warning "Chrome executable not specified and could not be automatically detected"
+  log_info "The server will attempt to find Chrome at runtime"
+else
+  log_info "Using Chrome executable: $CHROME_EXECUTABLE"
+fi
+
+# Check if necessary directories exist
+if [ ! -d "node_modules" ]; then
+  log_info "Installing dependencies..."
+  
+  # Check for package-lock.json to determine if we should use npm ci or npm install
+  if [ -f "package-lock.json" ]; then
+    npm ci || npm install
+  else
+    npm install
   fi
   
-  log_info "Cleanup complete"
+  if [ $? -ne 0 ]; then
+    log_error "Failed to install dependencies"
+    exit 1
+  fi
+fi
+
+# Check if dist directory exists, if not, build
+if [ ! -d "dist" ] || [ ! -f "dist/index.js" ]; then
+  log_info "Building TypeScript code..."
+  npm run build
+  
+  if [ $? -ne 0 ]; then
+    log_error "Build failed"
+    exit 1
+  fi
+  
+  log_success "Build completed successfully"
+else
+  log_info "Using existing build"
+fi
+
+# Create data directory if it doesn't exist
+if [ ! -d "data" ]; then
+  mkdir -p data
+  log_info "Created data directory"
+fi
+
+# Create logs directory if it doesn't exist
+if [ ! -d "logs" ]; then
+  mkdir -p logs
+  log_info "Created logs directory"
+fi
+
+# Set environment variables for the server
+# These use the improved Chrome Process Manager functionality
+export MANAGE_CHROME_PROCESS=true
+export CHROME_HEALTH_CHECK_INTERVAL=5000
+export CHROME_MAX_CPU_USAGE=90
+export CHROME_MAX_MEMORY_USAGE=2000
+export CHROME_RESTART_ATTEMPTS=5
+export CHROME_RESTART_BACKOFF=1000
+export ENABLE_CONNECTION_RECOVERY=true
+export GRACEFUL_SHUTDOWN_TIMEOUT=10000
+
+# For development, we start Chrome in non-headless mode
+if [[ "$NODE_ENV" == "development" ]]; then
+  export CHROME_HEADLESS=false
+  log_info "Starting in development mode (non-headless Chrome)"
+else
+  export CHROME_HEADLESS=true
+  log_info "Starting in production mode (headless Chrome)"
+fi
+
+# Additional Chrome flags for better performance
+export CHROME_ADDITIONAL_FLAGS="--disable-features=IsolateOrigins,site-per-process,TranslateUI,BlinkGenPropertyTrees --disable-blink-features=AutomationControlled --hide-scrollbars --disable-speech-api --mute-audio --ignore-certificate-errors --disable-notifications"
+
+# Start the server with potential recovery
+MAX_RETRIES=3
+RETRY_COUNT=0
+
+# Trap SIGINT and SIGTERM for graceful shutdown
+trap_handler() {
+  log_info "Shutting down Chrome MCP server..."
+  exit 0
 }
 
-# Register cleanup on exit
-trap cleanup EXIT INT TERM
+trap trap_handler SIGINT SIGTERM
 
-# Check if Node.js is installed
-if ! command -v node &> /dev/null; then
-    log_error "Node.js is not installed"
-    log_info "Please install Node.js from https://nodejs.org/"
-    exit 1
-fi
+start_server() {
+  log_info "Starting Chrome Control MCP server..."
+  log_info "Server port: $PORT | Chrome debugging port: $CHROME_DEBUGGING_PORT"
 
-# Print Node.js information
-NODE_VERSION=$(node -v)
-log_info "Using Node.js $NODE_VERSION"
-
-# Check if necessary directories exist and install dependencies if needed
-if [ ! -d "node_modules" ]; then
-    log_info "Installing dependencies..."
-    
-    if command -v npm &> /dev/null; then
-        npm ci || npm install
+  node dist/index.js
+  RESULT=$?
+  
+  if [ $RESULT -ne 0 ]; then
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+      RETRY_COUNT=$((RETRY_COUNT + 1))
+      DELAY=$((2 ** RETRY_COUNT))
+      log_warning "Server exited with code $RESULT. Retrying in $DELAY seconds... (attempt $RETRY_COUNT of $MAX_RETRIES)"
+      sleep $DELAY
+      start_server
     else
-        log_error "npm is not available"
-        exit 1
+      log_error "Server failed to start after $MAX_RETRIES attempts"
+      exit 1
     fi
-fi
-
-# Build TypeScript code if needed
-if [ "$BUILD_FIRST" == "true" ]; then
-    log_info "Building TypeScript code..."
-    npm run build || { 
-        log_error "Build failed"
-        exit 1
-    }
-    log_success "Build completed successfully"
-fi
-
-# Define environment variables for the server
-export PORT=$SERVER_PORT
-export CHROME_DEBUGGING_PORT=$CHROME_DEBUG_PORT
-export MANAGE_CHROME_PROCESS=$MANAGE_CHROME
-export LOG_LEVEL=$LOG_LEVEL
-export NODE_ENV=$NODE_ENV
+  fi
+}
 
 # Start the server
-log_info "Starting Chrome Control MCP server on port $SERVER_PORT..."
-log_info "Chrome Process Management: $MANAGE_CHROME"
-
-# Check if running in development mode
-if [ "$NODE_ENV" == "development" ]; then
-    log_info "Running in development mode with live code reload"
-    npx ts-node-esm src/index.ts &
-else
-    log_info "Running in production mode"
-    node dist/index.js &
-fi
-
-# Save the server PID
-SERVER_PID=$!
-echo $SERVER_PID > .server.pid
-log_info "Server started with PID: $SERVER_PID"
-
-# Wait for the server to start
-log_info "Waiting for server to start..."
-MAX_RETRIES=10
-RETRY_DELAY=1
-started=false
-
-for i in $(seq 1 $MAX_RETRIES); do
-    if curl -s "http://localhost:$SERVER_PORT$HEALTH_CHECK_PATH" > /dev/null; then
-        started=true
-        break
-    fi
-    log_info "Waiting for server to start (attempt $i of $MAX_RETRIES)..."
-    sleep $RETRY_DELAY
-done
-
-if [ "$started" = true ]; then
-    log_success "Chrome Control MCP server started successfully"
-    log_info "Server: http://localhost:$SERVER_PORT"
-    log_info "Health check: http://localhost:$SERVER_PORT$HEALTH_CHECK_PATH"
-    log_info "Chrome debug: http://localhost:$CHROME_DEBUG_PORT"
-    
-    # Wait for the server process to finish
-    wait $SERVER_PID
-else
-    log_error "Server failed to start after $MAX_RETRIES attempts"
-    exit 1
-fi
+start_server
