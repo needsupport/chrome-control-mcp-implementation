@@ -12,6 +12,8 @@ All notable changes to the Chrome Control MCP Implementation will be documented 
 - Temporary directory cleanup and resource management
 - Performance optimizations for local deployment
 - Example scripts for common local use cases
+- Comprehensive accessibility tree support with issue detection
+- Basic test suite for Chrome Process Manager and accessibility tree
 
 ### Changed
 - Updated roadmap with focus on local deployment
@@ -19,6 +21,7 @@ All notable changes to the Chrome Control MCP Implementation will be documented 
 - Improved graceful shutdown with proper cleanup of all resources
 - Optimized local performance for reduced overhead
 - Updated documentation for local deployment scenarios
+- Added accessibility tree API endpoint and documentation
 
 ### Fixed
 - Chrome process management in startup script
@@ -26,6 +29,8 @@ All notable changes to the Chrome Control MCP Implementation will be documented 
 - Improved error handling with local environment focus
 - Tab management race conditions
 - Process resources memory leaks
+- Fixed missing retry function implementation
+- Added proper error handling for accessibility tree extraction
 
 ## [Previously Added]
 - Automated Chrome process management in startup script
