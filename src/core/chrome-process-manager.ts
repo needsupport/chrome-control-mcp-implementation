@@ -1,6 +1,6 @@
 /**
  * Chrome Process Manager
- * 
+ *
  * Handles the lifecycle of Chrome processes, including:
  * - Starting Chrome with proper debugging flags
  * - Monitoring Chrome process health
@@ -243,9 +243,9 @@ export class ChromeProcessManager extends EventEmitter {
           `${os.homedir()}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe`
         ];
         
-        for (const path of possiblePaths) {
-          if (fs.existsSync(path)) {
-            return path;
+        for (const possiblePath of possiblePaths) {
+          if (fs.existsSync(possiblePath)) {
+            return possiblePath;
           }
         }
         
@@ -258,23 +258,27 @@ export class ChromeProcessManager extends EventEmitter {
           `${os.homedir()}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
         ];
         
-        for (const path of possiblePaths) {
-          if (fs.existsSync(path)) {
-            return path;
+        for (const possiblePath of possiblePaths) {
+          if (fs.existsSync(possiblePath)) {
+            return possiblePath;
           }
         }
         
         // Default fallback for macOS
         return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
       } else {
-        // Linux and others - use which command to find executables
+        // Linux and others - use which command to find executables in PATH
         for (const exe of ['google-chrome', 'google-chrome-stable', 'chrome', 'chromium', 'chromium-browser']) {
           try {
-            const result = execCallback(`which ${exe}`, (error, stdout) => {
-              if (!error && stdout && stdout.toString().trim()) {
-                return stdout.toString().trim();
+            const { stdout } = execCallback(`which ${exe}`, (error, stdout) => {
+              if (!error && stdout) {
+                return stdout.trim();
               }
             });
+            
+            if (stdout && typeof stdout === 'string' && stdout.trim()) {
+              return stdout.trim();
+            }
           } catch {
             // Ignore which command failure and try next executable
           }
@@ -287,9 +291,9 @@ export class ChromeProcessManager extends EventEmitter {
           '/usr/bin/chromium-browser'
         ];
         
-        for (const path of possiblePaths) {
-          if (fs.existsSync(path)) {
-            return path;
+        for (const possiblePath of possiblePaths) {
+          if (fs.existsSync(possiblePath)) {
+            return possiblePath;
           }
         }
         
@@ -447,14 +451,10 @@ export class ChromeProcessManager extends EventEmitter {
    */
   private async isDebugPortInUse(): Promise<boolean> {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
-      
       const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
-        signal: controller.signal
+        // @ts-ignore
+        timeout: 2000 // 2 second timeout
       });
-      
-      clearTimeout(timeoutId);
       return response.ok;
     } catch (error) {
       return false;
@@ -552,7 +552,7 @@ export class ChromeProcessManager extends EventEmitter {
         const timeoutId = setTimeout(() => controller.abort(), 2000);
         
         const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
-          signal: controller.signal
+          signal: controller.signal as any
         });
         
         clearTimeout(timeoutId);
@@ -734,7 +734,7 @@ export class ChromeProcessManager extends EventEmitter {
       const timeoutId = setTimeout(() => controller.abort(), 5000);
       
       const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
-        signal: controller.signal
+        signal: controller.signal as any
       });
       
       clearTimeout(timeoutId);
@@ -743,12 +743,6 @@ export class ChromeProcessManager extends EventEmitter {
         // Also check if targets are available (a good indicator of Chrome health)
         const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
         isHealthy = targetsResponse.ok;
-        
-        if (targetsResponse.ok) {
-          const targets = await targetsResponse.json();
-          // Check if targets is an array (valid response)
-          isHealthy = Array.isArray(targets);
-        }
       } else {
         isHealthy = false;
       }
@@ -851,6 +845,7 @@ export class ChromeProcessManager extends EventEmitter {
         const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
         if (targetsResponse.ok) {
           const targets = await targetsResponse.json();
+          
           if (Array.isArray(targets)) {
             for (const target of targets) {
               if (target.type === 'page' && target.id) {
@@ -1007,18 +1002,19 @@ export class ChromeProcessManager extends EventEmitter {
         // Try to continue anyway as the version check might be failing due to different output format
         return { majorVersion: 0, fullVersion: versionOutput };
       }
-    } catch (error: any) {
+    } catch (error) {
       if (error instanceof ChromeVersionError) {
         throw error;
       }
       
       this.logger.warn('Error checking Chrome version', error);
       
-      if (error.message && error.message.includes('Command failed')) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage && errorMessage.includes('Command failed')) {
         throw new ChromeExecutableError(`Chrome executable not found or not valid: ${executablePath}`);
       }
       
-      throw new ChromeVersionError(`Failed to check Chrome version: ${error.message}`);
+      throw new ChromeVersionError(`Failed to check Chrome version: ${errorMessage}`);
     }
   }
 
