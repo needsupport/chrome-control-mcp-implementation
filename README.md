@@ -14,7 +14,7 @@ The Chrome Control MCP (Model Context Protocol) server enables AI assistants to 
 - **Form Handling** - Identifies and interacts with forms accurately
 - **Navigation Management** - Handles complex navigation scenarios reliably
 - **Error Recovery** - Sophisticated error handling with recovery strategies
-- **Security** - API key authentication and rate limiting
+- **Chrome Management** - Automatic Chrome process monitoring and recovery
 - **Caching** - Smart, mutation-aware cache invalidation for performance
 - **Race Condition Prevention** - Mutex-based locking for concurrent operations
 - **Memory Management** - Proper resource cleanup to prevent memory leaks
@@ -25,21 +25,19 @@ The implementation follows a modular architecture with these key components:
 
 1. **Chrome MCP Server** - Handles incoming requests from AI assistants
 2. **Chrome API** - Main interface to browser control
-3. **Tab Manager** - Centralized tab management
-4. **DOM Observer** - Monitors real-time DOM changes
-5. **Cache System** - Optimizes performance through intelligent caching
-6. **Semantic Analyzer** - Builds semantic representation of pages
-7. **Content Extractor** - Extracts structured content from pages
-8. **Auth Manager** - Provides API key-based authentication
+3. **Chrome Process Manager** - Manages Chrome browser lifecycle
+4. **Tab Manager** - Centralized tab management
+5. **DOM Observer** - Monitors real-time DOM changes
+6. **Cache System** - Optimizes performance through intelligent caching
+7. **Semantic Analyzer** - Builds semantic representation of pages
+8. **Content Extractor** - Extracts structured content from pages
 9. **Error Handler** - Provides global error handling and recovery strategies
-10. **Security Manager** - Handles input validation and sanitization
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js 16+
-- Chrome browser
 - npm or yarn
 
 ### Installation
@@ -60,62 +58,60 @@ The implementation follows a modular architecture with these key components:
    npm run build
    ```
 
-4. Start Chrome with remote debugging enabled:
-   ```bash
-   # macOS
-   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
-   
-   # Windows
-   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-   
-   # Linux
-   google-chrome --remote-debugging-port=9222
-   ```
-
-5. Start the server:
-   ```bash
-   npm start
-   ```
-   
-   Or use the convenience script (which will be enhanced to automatically launch Chrome with proper flags in upcoming releases):
+4. Start the server:
    ```bash
    ./start-chrome-mcp.sh
    ```
 
-### Important: Known Issues
-The current implementation has several known issues that are being addressed:
+The start script will automatically:
+- Build the TypeScript code if needed
+- Find and launch Chrome with the appropriate debugging flags
+- Start the MCP server
+- Provide a health check endpoint for verification
 
-1. **Chrome Process Management**: The startup script doesn't automatically launch Chrome with required debugging flags. Manual Chrome launch is required as shown in step 4 above.
-
-2. **Connection Management**: There can be race conditions during initialization and potential issues with reconnection if Chrome crashes.
-
-3. **Resource Cleanup**: The graceful shutdown process needs improvement to ensure proper cleanup of all resources.
-
-4. **Tab Management**: There are potential synchronization issues with concurrent tab operations.
-
-5. **Error Handling**: Some error conditions aren't properly handled, especially around Chrome connectivity.
-
-See the CHANGELOG.md for progress on addressing these issues.
-
-## Environment Variables
+### Environment Variables
 
 The server can be configured using environment variables:
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+|----------|-------------|---------
 | PORT | Server port | 3001 |
 | CHROME_DEBUGGING_PORT | Chrome debugging port | 9222 |
+| MANAGE_CHROME_PROCESS | Enable automatic Chrome management | true |
+| CHROME_EXECUTABLE | Path to Chrome executable | auto-detected |
 | DEBUG | Enable debug mode | false |
 | LOG_LEVEL | Log level (debug, info, warn, error) | info |
-| AUTH_ENABLED | Enable API key authentication | false |
-| API_KEYS | Comma-separated list of valid API keys | [] |
-| GENERATE_API_KEY_ON_STARTUP | Generate API key on startup | true |
-| RATE_LIMIT_ENABLED | Enable rate limiting | false |
-| RATE_LIMIT_REQUESTS | Max requests per window | 100 |
-| RATE_LIMIT_WINDOW | Time window in ms | 60000 |
-| REQUEST_TIMEOUT | Timeout for operations in ms | 30000 |
-| MAX_CACHE_SIZE | Maximum number of items in cache | 1000 |
-| MAX_SEMANTIC_ANALYSIS_DEPTH | Maximum depth for semantic analysis | 50 |
+| HEALTHCHECK_PATH | Health check endpoint path | /health |
+| AUTO_FREE_DEBUG_PORT | Kill process on debug port if in use | false |
+| AUTO_FREE_SERVER_PORT | Kill process on server port if in use | false |
+
+## Local Development
+
+This project is designed for local deployment where the Chrome Control MCP server and the AI assistant run on the same machine. The server automatically detects and manages Chrome, handling crashes and restarts without manual intervention.
+
+### Chrome Management
+
+The Chrome Process Manager component has been enhanced to:
+- Automatically locate Chrome on Windows, macOS, and Linux
+- Monitor Chrome process health and resource usage
+- Recover from Chrome crashes with exponential backoff
+- Clean up temporary profiles and resources on shutdown
+
+### Port Management
+
+The system now includes intelligent port management to:
+- Detect if the Chrome debug port or server port is in use
+- Automatically find alternative ports if needed
+- Provide detailed error messages for port conflicts
+
+### Health Checks
+
+Enhanced health monitoring is available at:
+- `/health` - Basic health status
+- `/health/details` - Detailed system information
+- `/health/chrome` - Chrome-specific status
+- `/livez` - Kubernetes-style liveness probe
+- `/readyz` - Kubernetes-style readiness probe
 
 ## Usage
 
@@ -126,8 +122,7 @@ The server provides a JSON-RPC API that can be accessed at `http://localhost:300
 fetch('http://localhost:3001', {
   method: 'POST',
   headers: { 
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer YOUR_API_KEY' // If auth is enabled
+    'Content-Type': 'application/json'
   },
   body: JSON.stringify({
     jsonrpc: '2.0',
@@ -149,96 +144,49 @@ To debug the server, you can use the following techniques:
 
 1. Set LOG_LEVEL to "debug" for detailed logs:
    ```bash
-   LOG_LEVEL=debug npm start
+   LOG_LEVEL=debug ./start-chrome-mcp.sh
    ```
 
-2. Use Chrome DevTools to inspect the Chrome instance:
+2. View the health check endpoint for system status:
+   ```bash
+   curl http://localhost:3001/health/details
+   ```
+
+3. Monitor Chrome process status:
+   ```bash
+   curl http://localhost:3001/health/chrome
+   ```
+
+4. Use Chrome DevTools to inspect the Chrome instance:
    Open `chrome://inspect` in a separate Chrome window and look for the controlled instance in the "Remote Target" section.
 
-3. Monitor network activity using the Network tab in Chrome DevTools.
+## Error Handling and Recovery
 
-4. For WebSocket debugging, use tools like Wireshark or Chrome's Network inspector.
+The system now implements robust error handling and recovery:
 
-## Semantic Analysis and Content Extraction
-
-The implementation provides sophisticated semantic analysis capabilities:
-
-### Semantic Analyzer
-- Identifies interactive elements (buttons, links, forms, etc.)
-- Assigns importance scores to elements based on multiple factors
-- Builds hierarchical relationships between elements
-- Uses ARIA roles and attributes for better accessibility
-- Finds elements by text, type, or role
-- Provides helpers for creating reliable CSS selectors
-
-### Content Extractor
-- Extracts structured content from pages (headings, paragraphs, lists, etc.)
-- Identifies navigation elements and menus
-- Extracts form structures with field types, options, and relationships
-- Processes main content areas with intelligent chunking
-- Extracts metadata from the page
-
-## Examples
-
-- **analyze-page.ts** - Demonstrates how to analyze a web page's structure
-- **search-and-extract.ts** - Shows how to perform a search and extract content
-
-Run examples with:
-
-```bash
-npx ts-node examples/analyze-page.ts https://example.com
-```
-
-## Security
-
-This implementation includes security features:
-
-1. **API Key Authentication** - Secure access using API keys
-2. **Rate Limiting** - Protection against abuse
-3. **Request Validation** - Ensures valid requests
-4. **CORS Control** - Configurable same-origin policy
-5. **Request Size Limits** - Prevents payload attacks
-6. **Input Sanitization** - Prevents injection attacks
-7. **Timeout Protection** - Guards against long-running operations
-
-## Performance Optimizations
-
-1. **Smart Caching** - Automatic cache invalidation based on DOM mutations
-2. **Tab Management** - Efficient handling of browser tabs
-3. **Content Chunking** - Processing large pages in manageable chunks
-4. **Resource Limits** - Configurable settings to prevent resource exhaustion
-5. **LRU Caching** - Efficient management of cached data
-6. **Optimized DOM Handling** - Efficient processing of DOM mutations
-7. **Mutex Locking** - Prevents race conditions in concurrent operations
-
-## Error Handling
-
-1. **Global Error Handlers** - Captures uncaught exceptions and unhandled rejections
-2. **Graceful Shutdown** - Proper cleanup of resources during errors
-3. **Automatic Recovery** - Retries operations when possible
-4. **Detailed Error Reporting** - Provides helpful error messages
-5. **Transaction Rollback** - Reverts partial operations on failure
+1. **Chrome Process Crashes**: Automatically detected and restarted with exponential backoff
+2. **Connection Failures**: Detected and reconnected with retry logic
+3. **Resource Leaks**: Properly tracked and cleaned up during shutdown
+4. **Tab Synchronization**: Mutex-based locking prevents race conditions
+5. **Graceful Shutdown**: Proper cleanup of all resources, even during abnormal termination
 
 ## Implementation Status
 
-- [x] Basic server structure
-- [x] Chrome API wrapper
-- [x] Tab management
+- [x] Chrome Process Manager - Complete implementation with health monitoring and crash recovery
+- [x] Intelligent port management - Detection and resolution of port conflicts
+- [x] Health check endpoints - Comprehensive health monitoring 
+- [x] Enhanced error handling - Robust recovery from failures
+- [x] Resource cleanup - Proper management of temporary files and processes
+- [x] Tab management with race condition prevention
 - [x] DOM mutation observing
-- [x] Cache system
+- [x] Semantic DOM analysis
+- [x] Content extraction
+- [x] Form handling
+- [x] Navigation management
 - [x] Authentication and security
-- [x] Rate limiting
-- [x] Race condition prevention
-- [x] Memory leak prevention
-- [x] Input validation and sanitization
-- [x] Global error handling
-- [x] Enhanced semantic analyzer - *Complete implementation*
-- [x] Content extractor - *Complete implementation*
-- [ ] Chrome process management - *In progress*
-- [ ] Enhanced graceful shutdown - *In progress*
-- [ ] Connection retry logic - *In progress*
-- [ ] Accessibility tree support - *Planned*
+- [x] Cache system
 - [ ] Test suite - *Planned*
+- [ ] Accessibility tree support - *Planned*
 
 ## License
 
