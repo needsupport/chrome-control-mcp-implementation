@@ -18,6 +18,7 @@ The Chrome Control MCP (Model Context Protocol) server enables AI assistants to 
 - **Caching** - Smart, mutation-aware cache invalidation for performance
 - **Race Condition Prevention** - Mutex-based locking for concurrent operations
 - **Memory Management** - Proper resource cleanup to prevent memory leaks
+- **Accessibility Tree** - Access to Chrome's accessibility tree for enhanced semantic understanding
 
 ## Architecture
 
@@ -32,6 +33,7 @@ The implementation follows a modular architecture with these key components:
 7. **Semantic Analyzer** - Builds semantic representation of pages
 8. **Content Extractor** - Extracts structured content from pages
 9. **Error Handler** - Provides global error handling and recovery strategies
+10. **Accessibility Tree Analyzer** - Extracts and analyzes the accessibility tree
 
 ## Getting Started
 
@@ -74,7 +76,7 @@ The start script will automatically:
 The server can be configured using environment variables:
 
 | Variable | Description | Default |
-|----------|-------------|---------
+|----------|-------------|---------|
 | PORT | Server port | 3001 |
 | CHROME_DEBUGGING_PORT | Chrome debugging port | 9222 |
 | MANAGE_CHROME_PROCESS | Enable automatic Chrome management | true |
@@ -84,6 +86,7 @@ The server can be configured using environment variables:
 | HEALTHCHECK_PATH | Health check endpoint path | /health |
 | AUTO_FREE_DEBUG_PORT | Kill process on debug port if in use | false |
 | AUTO_FREE_SERVER_PORT | Kill process on server port if in use | false |
+| ENABLE_ACCESSIBILITY_TREE | Enable accessibility tree support | true |
 
 ## Local Development
 
@@ -138,6 +141,32 @@ fetch('http://localhost:3001', {
 });
 ```
 
+### Accessibility Tree
+
+You can access and analyze the accessibility tree using the `getAccessibilityTree` method:
+
+```javascript
+// Get accessibility tree for analysis
+fetch('http://localhost:3001', {
+  method: 'POST',
+  headers: { 
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'getAccessibilityTree',
+    params: { tabId: 'your-tab-id' },
+    id: 1
+  })
+})
+.then(response => response.json())
+.then(data => {
+  const accessibilityTree = data.result.accessibilityTree;
+  console.log('Accessibility issues:', accessibilityTree.issues);
+  console.log('Accessibility summary:', accessibilityTree.summary);
+});
+```
+
 ## Debugging
 
 To debug the server, you can use the following techniques:
@@ -170,6 +199,19 @@ The system now implements robust error handling and recovery:
 4. **Tab Synchronization**: Mutex-based locking prevents race conditions
 5. **Graceful Shutdown**: Proper cleanup of all resources, even during abnormal termination
 
+## Testing
+
+Run the test suite to verify functionality:
+
+```bash
+npm test
+```
+
+The test suite includes:
+- Unit tests for key components
+- Integration tests for Chrome Process Manager
+- Tests for accessibility tree functionality
+
 ## Implementation Status
 
 - [x] Chrome Process Manager - Complete implementation with health monitoring and crash recovery
@@ -185,8 +227,8 @@ The system now implements robust error handling and recovery:
 - [x] Navigation management
 - [x] Authentication and security
 - [x] Cache system
-- [ ] Test suite - *Planned*
-- [ ] Accessibility tree support - *Planned*
+- [x] Test suite - Basic tests for critical components
+- [x] Accessibility tree support - Complete implementation with issue detection
 
 ## License
 
