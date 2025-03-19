@@ -544,6 +544,10 @@ async function routeRequest(method: string, params: Record<string, unknown>): Pr
     case 'performSearch':
       return chromeAPI.performSearch(params.tabId as string, params.query as string);
       
+    // Accessibility methods
+    case 'getAccessibilityTree':
+      return chromeAPI.getAccessibilityTree(params.tabId as string);
+      
     // Server status and management methods
     case 'getServerStatus':
       return {
