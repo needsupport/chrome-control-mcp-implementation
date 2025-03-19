@@ -60,15 +60,42 @@ The implementation follows a modular architecture with these key components:
    npm run build
    ```
 
-4. Start the server:
+4. Start Chrome with remote debugging enabled:
+   ```bash
+   # macOS
+   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+   
+   # Windows
+   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+   
+   # Linux
+   google-chrome --remote-debugging-port=9222
+   ```
+
+5. Start the server:
    ```bash
    npm start
    ```
    
-   Or use the convenience script:
+   Or use the convenience script (which will be enhanced to automatically launch Chrome with proper flags in upcoming releases):
    ```bash
    ./start-chrome-mcp.sh
    ```
+
+### Important: Known Issues
+The current implementation has several known issues that are being addressed:
+
+1. **Chrome Process Management**: The startup script doesn't automatically launch Chrome with required debugging flags. Manual Chrome launch is required as shown in step 4 above.
+
+2. **Connection Management**: There can be race conditions during initialization and potential issues with reconnection if Chrome crashes.
+
+3. **Resource Cleanup**: The graceful shutdown process needs improvement to ensure proper cleanup of all resources.
+
+4. **Tab Management**: There are potential synchronization issues with concurrent tab operations.
+
+5. **Error Handling**: Some error conditions aren't properly handled, especially around Chrome connectivity.
+
+See the CHANGELOG.md for progress on addressing these issues.
 
 ## Environment Variables
 
@@ -115,6 +142,22 @@ fetch('http://localhost:3001', {
   console.log(`Page loaded in tab: ${tabId}`);
 });
 ```
+
+## Debugging
+
+To debug the server, you can use the following techniques:
+
+1. Set LOG_LEVEL to "debug" for detailed logs:
+   ```bash
+   LOG_LEVEL=debug npm start
+   ```
+
+2. Use Chrome DevTools to inspect the Chrome instance:
+   Open `chrome://inspect` in a separate Chrome window and look for the controlled instance in the "Remote Target" section.
+
+3. Monitor network activity using the Network tab in Chrome DevTools.
+
+4. For WebSocket debugging, use tools like Wireshark or Chrome's Network inspector.
 
 ## Semantic Analysis and Content Extraction
 
@@ -191,6 +234,9 @@ This implementation includes security features:
 - [x] Global error handling
 - [x] Enhanced semantic analyzer - *Complete implementation*
 - [x] Content extractor - *Complete implementation*
+- [ ] Chrome process management - *In progress*
+- [ ] Enhanced graceful shutdown - *In progress*
+- [ ] Connection retry logic - *In progress*
 - [ ] Accessibility tree support - *Planned*
 - [ ] Test suite - *Planned*
 
