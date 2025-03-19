@@ -88,7 +88,7 @@ export async function withRetry<T>(
     shouldRetry = () => true
   } = options;
 
-  let lastError: Error | null = null;
+  let lastError: Error = new Error('Unknown error occurred');
   let delay = initialDelay;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
@@ -115,7 +115,7 @@ export async function withRetry<T>(
   }
 
   // This should never be reached due to the throw in the catch block
-  throw lastError || new Error(`${name} failed for unknown reason`);
+  throw lastError;
 }
 
 /**
