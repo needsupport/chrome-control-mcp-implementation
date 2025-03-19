@@ -12,6 +12,62 @@ import { Mutex, MutexInterface } from 'async-mutex';
 const logger = new Logger('retry-utils');
 
 /**
+ * Retries an asynchronous operation with exponential backoff.
+ * 
+ * @param fn - The async function to retry.
+ * @param options - Retry configuration options.
+ * @returns The result of the successful operation.
+ * @throws The last error if all retries fail.
+ */
+export async function retry<T>(
+  fn: () => Promise<T>,
+  options: {
+    retries?: number;
+    minTimeout?: number; 
+    maxTimeout?: number;
+    factor?: number;
+    onRetry?: (error: Error, attempt: number) => void;
+  } = {}
+): Promise<T> {
+  const {
+    retries = 3,
+    minTimeout = 1000,
+    maxTimeout = 30000,
+    factor = 2,
+    onRetry
+  } = options;
+  
+  let attempt = 0;
+  let lastError: Error;
+
+  while (attempt <= retries) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      
+      if (attempt === retries) {
+        break;
+      }
+
+      const delay = Math.min(
+        minTimeout * Math.pow(factor, attempt),
+        maxTimeout
+      );
+      
+      if (onRetry) {
+        onRetry(lastError, attempt + 1);
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+      attempt++;
+    }
+  }
+  
+  throw lastError;
+}
+
+/**
  * Retry an asynchronous operation with exponential backoff
  */
 export async function withRetry<T>(
