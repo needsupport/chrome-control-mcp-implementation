@@ -12,7 +12,7 @@ import { spawn, ChildProcess, exec as execCallback } from 'child_process';
 import { promisify } from 'util';
 import { Logger } from '../logging/logger.js';
 import { config } from '../config.js';
-import fetch from 'node-fetch';
+import fetch, { RequestInit } from 'node-fetch';
 import { EventEmitter } from 'events';
 import * as os from 'os';
 import * as path from 'path';
@@ -270,14 +270,13 @@ export class ChromeProcessManager extends EventEmitter {
         // Linux and others - use which command to find executables in PATH
         for (const exe of ['google-chrome', 'google-chrome-stable', 'chrome', 'chromium', 'chromium-browser']) {
           try {
-            const { stdout } = execCallback(`which ${exe}`, (error, stdout) => {
-              if (!error && stdout) {
-                return stdout.trim();
+            // Use synchronous exec to avoid async issues in this method
+            const result = execCallback.sync(`which ${exe}`);
+            if (result && result.stdout) {
+              const chromePath = result.stdout.toString().trim();
+              if (chromePath) {
+                return chromePath;
               }
-            });
-            
-            if (stdout && typeof stdout === 'string' && stdout.trim()) {
-              return stdout.trim();
             }
           } catch {
             // Ignore which command failure and try next executable
@@ -451,10 +450,11 @@ export class ChromeProcessManager extends EventEmitter {
    */
   private async isDebugPortInUse(): Promise<boolean> {
     try {
-      const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, {
-        // @ts-ignore
+      const requestInit: RequestInit = {
         timeout: 2000 // 2 second timeout
-      });
+      };
+      
+      const response = await fetch(`http://localhost:${this.options.debugPort}/json/version`, requestInit);
       return response.ok;
     } catch (error) {
       return false;
@@ -844,7 +844,7 @@ export class ChromeProcessManager extends EventEmitter {
       try {
         const targetsResponse = await fetch(`http://localhost:${this.options.debugPort}/json/list`);
         if (targetsResponse.ok) {
-          const targets = await targetsResponse.json();
+          const targets = await targetsResponse.json() as any[];
           
           if (Array.isArray(targets)) {
             for (const target of targets) {
@@ -877,7 +877,7 @@ export class ChromeProcessManager extends EventEmitter {
               if (process.platform === 'win32') {
                 // On Windows, we need to use taskkill for force kill
                 exec(`taskkill /F /PID ${this.chromeProcess.pid}`).catch(e => {
-                  this.logger.debug(`Error in taskkill: ${e.message}`);
+                  this.logger.debug(`Error in taskkill: ${e instanceof Error ? e.message : String(e)}`);
                 });
               } else {
                 this.chromeProcess.kill('SIGKILL');
