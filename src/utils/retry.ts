@@ -38,7 +38,7 @@ export async function retry<T>(
   } = options;
   
   let attempt = 0;
-  let lastError: Error = new Error('Unknown error');
+  let lastError: Error = new Error('Unknown error occurred');
 
   while (attempt <= retries) {
     try {
@@ -115,10 +115,7 @@ export async function withRetry<T>(
   }
 
   // This should never be reached due to the throw in the catch block
-  if (lastError) {
-    throw lastError;
-  }
-  throw new Error(`${name} failed for unknown reason`);
+  throw lastError || new Error(`${name} failed for unknown reason`);
 }
 
 /**
